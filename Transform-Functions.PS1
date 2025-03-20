@@ -6,11 +6,11 @@ if (-not $global:TransformFunctions) {
 # Functions
 
 function GenderTransform($value) {
-    if ($value -match "Mr") {
-        return "Male"
-    }
-    elseif ($value -match "Mrs" -or $value -match "Miss") {
+    if ($value -match "\b(Mrs|Miss|Ms)\b") {
         return "Female"
+    }
+    elseif ($value -match "\bMr\b") {
+        return "Male"
     }
     else {
         return ""
