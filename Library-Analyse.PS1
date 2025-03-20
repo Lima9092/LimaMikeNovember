@@ -17,8 +17,6 @@ if ($consolePtr -ne [IntPtr]::Zero) {
 }
 
 # Library Migration Assistant PowerShell Script
-# This script helps map fields between library systems
-# Usage: .\LibraryMigrationAssistant.ps1
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -940,34 +938,44 @@ $lstSourceFields.Add_SelectedIndexChanged({
 $lstTargetFields.Add_SelectedIndexChanged({
     if ($lstTargetFields.SelectedItem) {
         $selectedItem = $lstTargetFields.SelectedItem
-        # Remove " [Required]" from the field name using the correct -replace syntax
-        $fieldName = $selectedItem -replace ' $begin:math:display$Required$end:math:display$', ''
+
+        # DEBUG: Show exactly what string was selected
+        Write-Host "DEBUG: Selected item is '$selectedItem'"
+
+        # Remove any trailing " [Required]" (with optional surrounding spaces)
+        $fieldName = $selectedItem -replace '\s*\[Required\]\s*$', ''
         
-        $targetField = $global:TargetFields | Where-Object { $_.FieldName -eq $fieldName } | Select-Object -First 1
+        # DEBUG: Show how the cleaned-up field name looks
+        Write-Host "DEBUG: fieldName after replace is '$fieldName'"
+
+        # Find the matching target-field object
+        $targetField = $global:TargetFields |
+            Where-Object { $_.FieldName -eq $fieldName } |
+            Select-Object -First 1
         
         if ($targetField) {
             $txtDataPreview.Clear()
             $txtDataPreview.AppendText("Target Field: $($targetField.FieldName)`r`n")
             $txtDataPreview.AppendText("Data Type: $($targetField.DataType)`r`n")
             
-            # Compute the required field text before appending
             $req = if ($targetField.Mandatory) { 'Yes' } else { 'No' }
             $txtDataPreview.AppendText("Required: $req`r`n")
             
-            if ($targetField.Validation) {
+            # Show validation rule if present
+            if ($targetField.ValidationRule) {
                 $txtDataPreview.AppendText("Validation Rule: $($targetField.ValidationRule)`r`n")
             }
             
-            if ($targetField.Transformation) {
+            # If there's a default transform function
+            if ($targetField.TransformFunction) {
                 $txtDataPreview.AppendText("Default Transformation: $($targetField.TransformFunction)`r`n")
             }
             
-            # Show current mapping if exists
+            # Show current mapping if it exists
             if ($global:Mappings.ContainsKey($targetField.FieldName)) {
                 $mapping = $global:Mappings[$targetField.FieldName]
                 $txtDataPreview.AppendText("`r`nCurrent Mapping:`r`n")
                 $txtDataPreview.AppendText("Mapped from: $($mapping.SourceField)`r`n")
-                
                 if ($mapping.Transformation) {
                     $txtDataPreview.AppendText("Transformation: $($mapping.Transformation)`r`n")
                 }
@@ -983,12 +991,21 @@ $lstTargetFields.Add_SelectedIndexChanged({
                 }
             }
         }
+        else {
+            Write-Host "DEBUG: No targetField found for '$fieldName'."
+            Write-Host "DEBUG: Available FieldName values are:"
+            $global:TargetFields | ForEach-Object { Write-Host " - $($_.FieldName)" }
+        }
     }
 })
+
 
 $scriptContent += "`$mappings | Export-Csv -Path 'field_mappings.csv' -NoTypeInformation`r`n"
 
 # In your Analyze code:
+# This version focuses on exact but case-insensitive matches, 
+# and ensures the DataGridView is properly populated
+
 $btnAnalyze.Add_Click({
     if (-not $global:SourceFields -or -not $global:TargetFields) {
         [System.Windows.Forms.MessageBox]::Show("Please load source and target data first", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
@@ -996,46 +1013,92 @@ $btnAnalyze.Add_Click({
     }
     
     $statusBarLabel.Text = "Analyzing fields..."
-    $global:SuggestedMappings = @{}
     
+    # Initialize our data structures to ensure they exist
+    $global:SuggestedMappings = @{}
+    $global:Mappings = @{}
+    
+    # Clear the grid first to ensure it's refreshed
+    $dgvMappings.Rows.Clear()
+    
+    # Process each target field
     foreach ($targetField in $global:TargetFields) {
-        $fieldName = $targetField.FieldName.Trim()
-        $suggestions = @()
+        $targetFieldName = $targetField.FieldName.Trim()
+        $exactMatches = @()
         
-        # Case-insensitive exact match
-        $exactMatches = $global:SourceFields | Where-Object { $_.Trim().ToLower() -eq $fieldName.ToLower() }
-        foreach ($m in $exactMatches) {
-            $suggestions += @{ SourceField = $m; Score = 1.0; Reason = "Exact match" }
-        }
-        
-        if (-not $suggestions) {
-            foreach ($sourceField in $global:SourceFields) {
-                $similarity = Get-StringSimilarity -String1 $fieldName -String2 $sourceField.Trim()
-                if ($similarity -ge 0.5) {
-                    $suggestions += @{ SourceField = $sourceField; Score = $similarity; Reason = "Similar name" }
+        # Find exact case-insensitive matches
+        foreach ($sourceField in $global:SourceFields) {
+            $sourceFieldName = $sourceField.Trim()
+            if ($sourceFieldName -eq $targetFieldName -or $sourceFieldName.ToLower() -eq $targetFieldName.ToLower()) {
+                $exactMatches += $sourceFieldName
+                
+                # Store the mapping immediately
+                $global:Mappings[$targetFieldName] = @{
+                    SourceField    = $sourceFieldName
+                    Transformation = $null
+                    Notes          = $targetField.Notes
                 }
-            }
-        }
-        
-        $sorted = $suggestions | Sort-Object -Property Score -Descending
-        $global:SuggestedMappings[$fieldName] = $sorted
-        
-        # If top suggestion's Score >= 0.99, we auto-assign
-        if ($sorted.Count -gt 0 -and $sorted[0].Score -ge 0.99) {
-            $bestMatch = $sorted[0].SourceField
-            $global:Mappings[$fieldName] = @{
-                SourceField    = $bestMatch
-                Transformation = $null
-                Notes          = $targetField.Notes
+                
+                # For debugging
+                Write-Host "Mapped: Target='$targetFieldName' to Source='$sourceFieldName'"
+                break
             }
         }
     }
     
+    # Update the grid with the new mappings
     Update-MappingGrid
+    
+    # Switch to the Map tab
     $tabControl.SelectedTab = $tabMap
-    $statusBarLabel.Text = "Analysis complete"
-    [System.Windows.Forms.MessageBox]::Show("Field analysis complete. Please review and edit the suggested mappings.", "Analysis Complete", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+    
+    # Update status
+    $mappingCount = $global:Mappings.Count
+    $statusBarLabel.Text = "Analysis complete - Found $mappingCount exact matches"
+    [System.Windows.Forms.MessageBox]::Show("Field analysis complete. $mappingCount fields were automatically mapped. Please review the mappings.", "Analysis Complete", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
 })
+
+# Make sure this function properly displays all mappings
+function Update-MappingGrid {
+    # Always clear the grid before updating
+    $dgvMappings.Rows.Clear()
+    
+    # For debugging
+    Write-Host "Updating grid with $($global:Mappings.Count) mappings"
+    
+    # Add all target fields to the grid
+    foreach ($targetField in $global:TargetFields) {
+        $fieldName = $targetField.FieldName
+        $required = if ($targetField.Mandatory) { "Yes" } else { "No" }
+        
+        $sourceField = ""
+        $transform = ""
+        
+        # If we have a mapping for this field, use it
+        if ($global:Mappings.ContainsKey($fieldName)) {
+            $mapping = $global:Mappings[$fieldName]
+            $sourceField = $mapping.SourceField
+            $transform = if ($mapping.Transformation) { $mapping.Transformation } else { "" }
+            
+            # For debugging
+            Write-Host "  Grid row: Target='$fieldName', Source='$sourceField'"
+        }
+        
+        # Add the row to the grid
+        $rowIndex = $dgvMappings.Rows.Add($fieldName, $sourceField, $transform, $required)
+        
+        # Highlight required fields that don't have a mapping
+        if ($targetField.Mandatory -and [string]::IsNullOrWhiteSpace($sourceField)) {
+            $dgvMappings.Rows[$rowIndex].Cells[1].Style.BackColor = [System.Drawing.Color]::LightPink
+        }
+    }
+    
+    # Force a UI refresh
+    $dgvMappings.Refresh()
+    
+    # Update the export preview
+    Update-ExportPreview
+}
 
 function Update-MappingGrid {
     $dgvMappings.Rows.Clear()
