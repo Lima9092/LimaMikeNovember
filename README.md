@@ -1,31 +1,55 @@
-# Library Migration Assistant
+# Library-Analyse
 
-A comprehensive PowerShell toolkit for library system migrations, helping librarians and system administrators map fields between different library systems and transform data during migration.
+A comprehensive PowerShell toolkit for library system migrations, helping librarians and system administrators map fields between different library management systems, transform data during migration, and ensure compatibility with target systems.
 
 ## Overview
 
-The Library Migration Assistant consists of two main tools:
+This repository contains three essential PowerShell GUI tools designed to help library staff migrate data between different library management systems:
 
-1. **Library Migration Assistant** - A field mapping tool for planning data migrations
-2. **Library Data Transformation Tool** - A data processing utility that applies mappings to actual data
+1. **Library-Analyse** - A field mapping tool for planning data migrations between source and target systems
+2. **Library-Process** - Process, validate, and transform data according to mapping rules and business requirements
+3. **CSVtoTSV-Converter** - Convert standard CSV files to required "field=value" format
 
-These tools work together to simplify the complex process of migrating from one library system to another while ensuring data integrity and consistency.
+These tools work together to simplify the complex process of migrating from one library system to another while ensuring data integrity and consistency throughout the migration process.
 
 ## Features
 
-### Library Migration Assistant
-- Load source data and target system requirements
-- Analyze field compatibility between systems
-- Generate intelligent mapping suggestions
-- Create and edit field mappings with transformations
-- Export mapping configurations for later use
+### Library-Analyse
 
-### Library Data Transformation Tool
-- Apply field mappings to real data
-- Transform data according to target system requirements
-- Validate data against business rules
-- Identify and highlight data errors
-- Export transformed data ready for import into the target system
+![Library-Analyse](Library-Analyse.png)
+
+- **Load Files Tab**: Import source data (CSV/Excel) and target field requirements
+- **Analyze Tab**: Review source and target fields with data preview and compatibility analysis
+- **Map Fields Tab**: Create field mappings with transformation options and validation rules
+- **Export Tab**: Generate mapping files with complete configuration options
+
+Key capabilities:
+- Automatic field mapping suggestions based on intelligent analysis
+- Custom text transformations with live preview
+- Field validation rules using regular expressions
+- Export to CSV or PowerShell script format for automation
+- Support for complex data type conversions
+
+### Library-Process
+
+![Library-Process](Library-Process.png)
+
+- Process data according to mapping rules defined in the Migration Assistant
+- Apply transformations to standardize data across systems
+- Validate data against business rules and requirements
+- Highlight errors for easy identification with detailed error reporting
+- Filter and sort data by various criteria (errors only, mapped fields only)
+- Toggle between original and mapped field orders
+- Export processed data ready for import and detailed error logs
+
+### CSVtoTSV-Converter
+
+![CSV2TSV-Converter](CSVtoTSV-Converter.png)
+
+- Convert standard CSV files to TSV "field=value" tab-delimited format
+- Built-in naming convention guide for target-compatible files
+- Skip blank fields automatically
+- Convenient file naming templates with copy buttons
 
 ## Requirements
 
@@ -35,9 +59,9 @@ These tools work together to simplify the complex process of migrating from one 
 
 ## Installation
 
-1. Clone this repository
+1. Clone or download this repository
 2. Ensure PowerShell execution policy allows script execution
-3. Run the scripts directly from PowerShell
+3. Run the scripts directly from PowerShell or create shortcuts for easier access
 
 ```powershell
 # Clone the repository
@@ -51,11 +75,16 @@ cd library-migration-assistant
 
 # Run the transformation tool
 .\LibraryDataTransformationTool.ps1
+
+# Run the TSV converter
+.\CsvToTSVConverter.ps1
 ```
+
+No additional PowerShell modules are required by default, but the ImportExcel module will be suggested for Excel file imports if needed.
 
 ## Usage Guide
 
-### Library Migration Assistant
+### Library-Analyse
 
 1. **Load Files Tab**
    - Browse for your source data CSV/Excel file containing actual library data
@@ -79,7 +108,7 @@ cd library-migration-assistant
    - Include validation rules and transformations as needed
    - Export the mapping file for use with the Data Transformation Tool
 
-### Library Data Transformation Tool
+### Library-Process
 
 1. **Load Files**
    - Load the mapping file created with the Migration Assistant
@@ -99,6 +128,32 @@ cd library-migration-assistant
    - Export the transformed data ready for import into the new system
    - Export error logs for further analysis and cleanup
 
+### CSVtoTSV-Converter
+
+1. **Load CSV**
+   - Load your processed data CSV file
+
+2. **Export to Target Format**
+   - Convert data to TSV "field=value" tab-delimited format
+   - Use the built-in naming convention guide
+   - Export files following target's naming requirements
+
+### File Naming Conventions
+
+When exporting files for target systems, follow these naming conventions, where `x` represents your authority number:
+
+- `borrowers_authx` *
+- `borrower_status_authx`
+- `borrower_messages_remarks_authx`
+- `items_authx` *
+- `item_status_authx`
+- `item_messages_remarks_authx`
+- `loans_authx` *
+- `reservations_authx`
+- `loan_history_authx`
+
+Files marked with * are mandatory.
+
 ## Transformation Functions
 
 The system uses a collection of transformation functions to modify data during migration. These functions are defined in the `Transform-Functions.ps1` file.
@@ -108,11 +163,11 @@ The system uses a collection of transformation functions to modify data during m
 ```powershell
 # Gender detection based on title
 function GenderTransform($value) {
-    if ($value -match "Mr") {
-        return "Male"
-    }
-    elseif ($value -match "Mrs" -or $value -match "Miss") {
+    if ($value -match "\b(Mrs|Miss|Ms)\b") {
         return "Female"
+    }
+    elseif ($value -match "\bMr\b") {
+        return "Male"
     }
     else {
         return ""
@@ -157,7 +212,15 @@ function FormatISBN($value) {
 $global:TransformFunctions["FormatISBN"] = ${function:FormatISBN}
 ```
 
-## Target System Requirements File Format
+## Requirements
+
+- Windows with PowerShell 5.1 or higher
+- .NET Framework 4.5 or higher
+- Recommended: 4GB RAM for processing large datasets
+
+## File Formats
+
+### Target System Requirements File Format
 
 The target requirements CSV file should contain the following columns:
 
@@ -178,7 +241,7 @@ BorrowerType,string,Yes,^(Student|Teacher|Staff)$,Must be one of the allowed val
 EmailAddress,string,No,^[\w.%+-]+@[\w.-]+\.[a-zA-Z]{2,}$,Must be valid email format
 ```
 
-## Field Mapping File Format
+### Field Mapping File Format
 
 The mapping file (created by the Migration Assistant) defines how fields are mapped and transformed:
 
@@ -190,4 +253,4 @@ The mapping file (created by the Migration Assistant) defines how fields are map
 - **ValidationRule**: Rule to check data against
 - **Transformation**: Whether transformation is enabled
 - **TransformFunction**: Name of the function to apply
-- **Required**: Whether the field is required
+- **Required**: Whether the field is required in the target system
