@@ -235,18 +235,29 @@ function Process-Data($data, $mapping) {
                             switch ($dataType.ToLower()) {
                                 "int" { $mappedValue = [int]$mappedValue }
                                 "decimal" { $mappedValue = [decimal]$mappedValue }
-                                "datetime" { $mappedValue = [datetime]$mappedValue }
+                                "datetime" { 
+                                    # Check specifically for the format dd/mm/yyyy HH:MM:SS
+                                    if ($mappedValue -match '^\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}$') {
+                                        try {
+                                            # Parse using exact format dd/MM/yyyy HH:mm:ss
+                                            $mappedValue = [datetime]::ParseExact(
+                                                $mappedValue, 
+                                                "dd/MM/yyyy HH:mm:ss", 
+                                                [System.Globalization.CultureInfo]::InvariantCulture
+                                            )
+                                        }
+                                        catch {
+                                            $error = "Invalid date format. Required format: dd/mm/yyyy HH:MM:SS"
+                                        }
+                                    }
+                                    else {
+                                        $error = "Invalid date format. Required format: dd/mm/yyyy HH:MM:SS"
+                                    }
+                                }
                                 default { }
                             }
                         } catch {
                             $error = "Data type conversion failed for $dataType"
-                        }
-                    }
-                    
-                    # Validation
-                    if ($doValidation -and $mappedValue -ne $null -and $mappedValue -ne "" -and $validationRule) {
-                        if (-not ($mappedValue -match $validationRule)) {
-                            $error = "Validation failed for rule $validationRule"
                         }
                     }
 
