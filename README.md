@@ -1,4 +1,4 @@
-# Library-Analyse
+# Library Migration Toolset
 
 A comprehensive PowerShell toolkit for library system migrations, helping librarians and system administrators map fields between different library management systems, transform data during migration, and ensure compatibility with target systems.
 
@@ -14,7 +14,7 @@ These tools work together to simplify the complex process of migrating from one 
 
 ## Features
 
-### Library-Analyse.PS1 (Library Analysis Tool)
+### Library-Analyse.PS1
 
 ![Library-Analyse](Library-Analyse.png)
 
@@ -30,7 +30,7 @@ Key capabilities:
 - Export to CSV or PowerShell script format for automation
 - Support for complex data type conversions
 
-### Library-Process.PS1 (Library Data Transformation Tool)
+### Library-Process.PS1
 
 ![Library-Process](Library-Process.png)
 
