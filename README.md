@@ -6,15 +6,15 @@ A comprehensive PowerShell toolkit for library system migrations, helping librar
 
 This repository contains three essential PowerShell GUI tools designed to help library staff migrate data between different library management systems:
 
-1. **Library-Analyse** - A field mapping tool for planning data migrations between source and target systems
-2. **Library-Process** - Process, validate, and transform data according to mapping rules and business requirements
+1. **Library-Analyse.PS1 (Library Analysis Tool)** - A field mapping tool for planning data migrations between source and target systems
+2. **Library-Process.PS1 (Library Data Transformation Tool)** - Process, validate, and transform data according to mapping rules and business requirements
 3. **CSVtoTSV-Converter** - Convert standard CSV files to required "field=value" format
 
 These tools work together to simplify the complex process of migrating from one library system to another while ensuring data integrity and consistency throughout the migration process.
 
 ## Features
 
-### Library-Analyse
+### Library-Analyse.PS1 (Library Analysis Tool)
 
 ![Library-Analyse](Library-Analyse.png)
 
@@ -30,7 +30,7 @@ Key capabilities:
 - Export to CSV or PowerShell script format for automation
 - Support for complex data type conversions
 
-### Library-Process
+### Library-Process.PS1 (Library Data Transformation Tool)
 
 ![Library-Process](Library-Process.png)
 
