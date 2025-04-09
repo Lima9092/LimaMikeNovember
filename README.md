@@ -4,15 +4,36 @@ A comprehensive PowerShell toolkit for library system migrations, helping librar
 
 ## Overview
 
-This repository contains three essential PowerShell GUI tools designed to help library staff migrate data between different library management systems:
+This repository contains four essential PowerShell GUI tools designed to help library staff migrate data between different library management systems:
 
-1. **Library-Analyse.PS1 (Library Analysis Tool)** - A field mapping tool for planning data migrations between source and target systems
-2. **Library-Process.PS1 (Library Data Transformation Tool)** - Process, validate, and transform data according to mapping rules and business requirements
-3. **CSVtoTSV-Converter** - Convert standard CSV files to required "field=value" format
+1. **Library-Compare.PS1 (Library Data Table Auditing Tool)** - Compare source and destination database tables and determine migration paths
+2. **Library-Analyse.PS1 (Library Analysis Tool)** - A field mapping tool for planning data migrations between source and target systems
+3. **Library-Process.PS1 (Library Data Transformation Tool)** - Process, validate, and transform data according to mapping rules and business requirements
+4. **CSVtoTSV-Converter** - Convert standard CSV files to required "field=value" format
 
 These tools work together to simplify the complex process of migrating from one library system to another while ensuring data integrity and consistency throughout the migration process.
 
 ## Features
+
+### Library-Compare.PS1
+
+![Library-Compare](Library-Compare.png)
+
+- **Source and Destination Selection**: Browse and load CSV folders from source and target systems
+- **Requirements Audit**: Analyze destination fields and find potential matches in source tables
+- **Source Audit**: Identify source fields that don't have a clear destination match
+- **Intelligent Field Matching**: Uses fuzzy matching algorithm to suggest field mappings based on names
+- **Visual Grouping**: Color-coded display of tables for easier comparison
+- **Known Matches Support**: Manually define field mappings that may not be automatically detected
+- **Export Reports**: Save audit results for further analysis and planning
+
+Key capabilities:
+- Levenshtein distance algorithm for fuzzy field matching
+- Configurable matching threshold
+- Support for multiple CSV tables in both source and destination systems
+- Tabbed interface for analyzing both required fields and unmapped source fields
+- Visual highlighting of problem areas (unmatched required fields)
+- Export capabilities for sharing audit results
 
 ### Library-Analyse.PS1
 
@@ -51,6 +72,31 @@ Key capabilities:
 - Skip blank fields automatically
 - Convenient file naming templates with copy buttons
 
+## Recommended Migration Workflow
+
+For best results, follow this recommended workflow:
+
+1. **Compare Tables (Library-Compare.PS1)**
+   - Load source and destination CSV files
+   - Analyze field matches between systems
+   - Identify potential mapping issues
+   - Export audit reports for planning
+
+2. **Define Field Mappings (Library-Analyse.PS1)**
+   - Create detailed field mappings based on Compare results
+   - Define transformations and validation rules
+   - Generate mapping configuration files
+
+3. **Transform Data (Library-Process.PS1)**
+   - Apply mapping rules to transform source data
+   - Validate and review transformed data
+   - Identify and correct data quality issues
+
+4. **Convert to Target Format (CSVtoTSV-Converter)**
+   - Convert processed data to target system format
+   - Apply proper naming conventions
+   - Prepare final files for import
+
 ## Requirements
 
 - Windows OS with PowerShell 5.1 or higher
@@ -70,19 +116,44 @@ git clone https://github.com/yourusername/library-migration-assistant.git
 # Navigate to the directory
 cd library-migration-assistant
 
+# Run the comparison tool
+.\Library-Compare.PS1
+
 # Run the migration assistant
-.\LibraryMigrationAssistant.ps1
+.\Library-Analyse.PS1
 
 # Run the transformation tool
-.\LibraryDataTransformationTool.ps1
+.\Library-Process.PS1
 
 # Run the TSV converter
-.\CsvToTSVConverter.ps1
+.\CSVtoTSV-Converter.PS1
 ```
 
 No additional PowerShell modules are required by default, but the ImportExcel module will be suggested for Excel file imports if needed.
 
 ## Usage Guide
+
+### Library-Compare
+
+1. **Select Source and Destination Folders**
+   - Browse for your source CSV folder containing tables from the current system
+   - Browse for your destination CSV folder containing target system field requirements
+   - Click "Run Analysis" to compare tables and fields
+
+2. **Review Requirements Audit**
+   - Review destination fields and potential source field matches
+   - Color-coded by table for easier comparison
+   - Pink highlights indicate unmatched required fields
+   - Score column shows confidence level of matches
+
+3. **Review Source Audit**
+   - Check which source fields don't have a corresponding destination
+   - Identify potential data loss or fields requiring special handling
+   - Color-coded by source table
+
+4. **Save Report**
+   - Export the audit results for documentation and planning
+   - Use these reports to guide the mapping process in Library-Analyse
 
 ### Library-Analyse
 
@@ -254,3 +325,18 @@ The mapping file (created by the Migration Assistant) defines how fields are map
 - **Transformation**: Whether transformation is enabled
 - **TransformFunction**: Name of the function to apply
 - **Required**: Whether the field is required in the target system
+
+### Known Matches File Format
+
+The Known-Matches.csv file (used by Library-Compare) helps define mappings that may not be automatically detected:
+
+- **Requirement**: Field name from the destination system
+- **Known-Fields**: Comma-separated list of source field names that map to this requirement
+
+Example:
+
+```csv
+Requirement,Known-Fields
+PatronID,BorrowerNumber,UserID
+EmailAddress,Email,UserEmail,ContactEmail
+```
