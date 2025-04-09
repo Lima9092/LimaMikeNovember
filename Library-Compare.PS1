@@ -101,22 +101,50 @@ function Get-RequirementFields {
 # Load known matches from CSV; create file if not present
 function Load-KnownMatches {
     param([string]$FilePath)
-    if (-not (Test-Path $FilePath)) {
-        "Requirement,Known-Fields" | Out-File -Encoding utf8 $FilePath
-    }
     $mapping = @{}
+    
+    # First check if file exists, create if not
+    if (-not (Test-Path $FilePath)) {
+        try {
+            "Requirement,Known-Fields" | Out-File -Encoding utf8 $FilePath
+            Write-Host "Created new Known-Matches file at $FilePath"
+        } catch {
+            Write-Host "Warning: Failed to create Known-Matches file: $_"
+            return $mapping
+        }
+    }
+    
+    # Try to load the file
     try {
         $km = Import-Csv -Path $FilePath
+        
+        # Process each row safely
+        foreach ($row in $km) {
+            # Skip if requirement is null or empty
+            if (-not $row.Requirement) { continue }
+            
+            $req = $row.Requirement.ToLower().Trim()
+            
+            # Skip if requirement is empty after trimming
+            if ([string]::IsNullOrWhiteSpace($req)) { continue }
+            
+            # Handle empty or null Known-Fields
+            $knownRaw = if ($row.'Known-Fields') { $row.'Known-Fields' } else { "" }
+            
+            # Process field list, handling nulls and empty values
+            $knownFields = @()
+            if (-not [string]::IsNullOrWhiteSpace($knownRaw)) {
+                $knownFields = $knownRaw -split "[,;]" | 
+                               ForEach-Object { if ($_) { $_.Trim() } } | 
+                               Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            }
+            
+            $mapping[$req] = $knownFields
+        }
     } catch {
         [System.Windows.Forms.MessageBox]::Show("Error loading Known-Matches file.`n$_")
-        return $mapping
     }
-    foreach ($row in $km) {
-        $req = $row.Requirement.ToLower().Trim()
-        $knownRaw = $row.'Known-Fields'
-        $knownFields = $knownRaw -split "[,;]" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
-        $mapping[$req] = $knownFields
-    }
+    
     return $mapping
 }
 
@@ -133,29 +161,75 @@ function Match-Fields {
         $destFieldList = $DestFields[$destTable]
         $mappingResults[$destTable] = @()
         foreach ($dfield in $destFieldList) {
-            $bestMatch = $null; $bestScore = 0; $candidateMatches = @(); $known = @()
-            if ($KnownMatches.ContainsKey($dfield.ToLower())) { $known = $KnownMatches[$dfield.ToLower()] }
+            $bestMatch = $null
+            $bestScore = 0
+            $candidateMatches = @()
+            $known = @()
+            
+            # Check if this field has known matches
+            $isKnownMatch = $false
+            if ($KnownMatches.ContainsKey($dfield.ToLower())) { 
+                $known = $KnownMatches[$dfield.ToLower()]
+                $isKnownMatch = $true
+            }
+            
+            # Now collect all candidate matches above threshold
             foreach ($sourceTable in $SourceFields.Keys) {
                 $sfields = $SourceFields[$sourceTable]
                 foreach ($sfield in $sfields) {
-                    $score = FuzzyMatch $sfield $dfield
+                    # For exact match or known match of the same name, set high score
+                    $exactMatch = $false
+                    if ($sfield -eq $dfield) {
+                        $score = 1.0  # Perfect match
+                        $exactMatch = $true
+                    } else {
+                        $score = FuzzyMatch $sfield $dfield
+                    }
+                    
+                    # If this is a known match, boost the score
+                    $isThisFieldKnownMatch = $false
                     if ($known.Count -gt 0 -and $known -contains $sfield.ToLower()) {
                         $score = [Math]::Max($score, 0.9)
+                        $isThisFieldKnownMatch = $true
                     }
+                    
+                    # Debug output
+                    Write-Host "Matching $destTable.$dfield with $sourceTable.$sfield - Score: $score (Known: $isThisFieldKnownMatch, Exact: $exactMatch)"
+                    
                     if ($score -gt $bestScore) {
                         $bestScore = $score
-                        $bestMatch = @{ SourceTable = $sourceTable; SourceField = $sfield; Score = $score }
+                        $bestMatch = @{ 
+                            SourceTable = $sourceTable
+                            SourceField = $sfield
+                            Score = $score
+                            IsKnownMatch = $isThisFieldKnownMatch
+                        }
                     }
+                    
                     if ($score -ge $Threshold) {
-                        $candidateMatches += @{ SourceTable = $sourceTable; SourceField = $sfield; Score = $score }
+                        $candidate = @{
+                            SourceTable = $sourceTable
+                            SourceField = $sfield
+                            Score = $score
+                            IsKnownMatch = $isThisFieldKnownMatch
+                        }
+                        $candidateMatches += $candidate
                     }
                 }
             }
+            
+            # Debug output
+            Write-Host "Final matching for $destTable.$dfield - Found $($candidateMatches.Count) candidates"
+            foreach ($c in $candidateMatches) {
+                Write-Host "  - Candidate: $($c.SourceTable).$($c.SourceField) Score: $($c.Score)"
+            }
+            
             if ($bestScore -lt $global:FuzzyThreshold) { $bestMatch = $null }
             $mappingResults[$destTable] += @{
-                DestField   = $dfield
-                BestMatch   = $bestMatch
-                Candidates  = $candidateMatches
+                DestField = $dfield
+                BestMatch = $bestMatch
+                Candidates = $candidateMatches
+                IsKnownMatch = $isKnownMatch
             }
         }
     }
@@ -169,21 +243,78 @@ function Generate-CSVReport {
     foreach ($destTable in $MappingResults.Keys) {
         foreach ($mapping in $MappingResults[$destTable]) {
             $destField = $mapping.DestField
-            if ($mapping.BestMatch -ne $null) {
-                $reportData += [PSCustomObject]@{
-                    DestinationTable = $destTable
-                    DestinationField = $destField
-                    SourceTable      = $mapping.BestMatch.SourceTable
-                    SourceField      = $mapping.BestMatch.SourceField
-                    Score            = [math]::Round($mapping.BestMatch.Score,2)
+            
+            # Debug output to check candidates
+            Write-Host "Processing $destTable.$destField with $($mapping.Candidates.Count) candidates"
+            
+            if ($mapping.Candidates -ne $null -and $mapping.Candidates.Count -gt 0) {
+                # Debug each candidate
+                foreach ($c in $mapping.Candidates) {
+                    Write-Host "  - Raw Candidate: $($c.SourceTable).$($c.SourceField) Score: $($c.Score)"
+                }
+                
+                # Create a hashtable to ensure uniqueness when grouping
+                $sourceTables = @{}
+                $groupedByField = @{}
+                
+                foreach ($candidate in $mapping.Candidates) {
+                    if (-not [string]::IsNullOrEmpty($candidate.SourceField)) {
+                        $sourceField = $candidate.SourceField
+                        $sourceTable = $candidate.SourceTable
+                        $score = $candidate.Score
+                        $isKnownMatch = $candidate.IsKnownMatch
+                        
+                        # Ensure this table is in the list for this field
+                        if (-not $groupedByField.ContainsKey($sourceField)) {
+                            $groupedByField[$sourceField] = @{
+                                Tables = @()
+                                HighestScore = $score
+                                IsKnownMatch = $isKnownMatch
+                            }
+                        }
+                        
+                        # Add table if not already in the list
+                        if (-not $groupedByField[$sourceField].Tables.Contains($sourceTable)) {
+                            $groupedByField[$sourceField].Tables += $sourceTable
+                        }
+                        
+                        # Update highest score if this one is higher
+                        if ($score -gt $groupedByField[$sourceField].HighestScore) {
+                            $groupedByField[$sourceField].HighestScore = $score
+                        }
+                        
+                        # Update known match status
+                        if ($isKnownMatch) {
+                            $groupedByField[$sourceField].IsKnownMatch = $true
+                        }
+                    }
+                }
+                
+                # Now create report entries from the grouped data
+                foreach ($sourceField in $groupedByField.Keys) {
+                    $entry = $groupedByField[$sourceField]
+                    $tablesList = $entry.Tables -join ", "
+                    
+                    Write-Host "  Adding to report: $sourceField from tables: $tablesList with score: $($entry.HighestScore)"
+                    
+                    $reportData += [PSCustomObject]@{
+                        DestinationTable = $destTable
+                        DestinationField = $destField
+                        SourceTable = $tablesList
+                        SourceField = $sourceField
+                        Score = [math]::Round($entry.HighestScore, 2)
+                        IsKnownMatch = $entry.IsKnownMatch
+                    }
                 }
             } else {
+                Write-Host "  No matches found for $destTable.$destField"
                 $reportData += [PSCustomObject]@{
                     DestinationTable = $destTable
                     DestinationField = $destField
-                    SourceTable      = ""
-                    SourceField      = "Not Matched"
-                    Score            = ""
+                    SourceTable = ""
+                    SourceField = "Not Matched"
+                    Score = ""
+                    IsKnownMatch = $false
                 }
             }
         }
@@ -203,10 +334,15 @@ function Generate-UnmatchedReport {
             $found = $false
             foreach ($destTable in $MappingResults.Keys) {
                 foreach ($mapping in $MappingResults[$destTable]) {
-                    if ($mapping.BestMatch -ne $null -and $mapping.BestMatch.SourceTable -eq $sourceTable -and $mapping.BestMatch.SourceField -eq $field) {
-                        $found = $true
-                        break
+                    if ($mapping.Candidates -ne $null) {
+                        foreach ($candidate in $mapping.Candidates) {
+                            if ($candidate.SourceTable -eq $sourceTable -and $candidate.SourceField -eq $field) {
+                                $found = $true
+                                break
+                            }
+                        }
                     }
+                    if ($found) { break }
                 }
                 if ($found) { break }
             }
@@ -251,9 +387,19 @@ function Apply-RequirementsFormatting {
             [System.Drawing.Color]::White 
         }
         
+        # Check for IsKnownMatch flag (new column)
+        $isKnownMatch = $false
+        if ($Grid.Columns.Contains("IsKnownMatch") -and $row.Cells["IsKnownMatch"].Value -is [bool]) {
+            $isKnownMatch = [bool]$row.Cells["IsKnownMatch"].Value
+        }
+        
         # Always highlight "Not Matched" in the SourceField column with pink
         if ($row.Cells["SourceField"].Value -eq "Not Matched") {
             $row.Cells["SourceField"].Style.BackColor = [System.Drawing.Color]::LightPink
+        }
+        # Highlight known matches with amber
+        elseif ($isKnownMatch) {
+            $row.Cells["SourceField"].Style.BackColor = [System.Drawing.Color]::Orange
         }
     }
 }
@@ -480,11 +626,14 @@ $btnRun.Add_Click({
             Write-Host "Sample report data: $($global:reportData[0] | Out-String)"
         }
         
-        # Create DataTable and a BindingSource for Requirements grid
+        # Create a fresh DataTable for Requirements grid
         $dtReq = New-Object System.Data.DataTable
-        foreach ($prop in @("DestinationTable", "DestinationField", "SourceTable", "SourceField", "Score")) {
-            [void]$dtReq.Columns.Add($prop)
-        }
+        $dtReq.Columns.Add("DestinationTable", [string]) | Out-Null
+        $dtReq.Columns.Add("DestinationField", [string]) | Out-Null
+        $dtReq.Columns.Add("SourceTable", [string]) | Out-Null
+        $dtReq.Columns.Add("SourceField", [string]) | Out-Null
+        $dtReq.Columns.Add("Score", [string]) | Out-Null
+        $dtReq.Columns.Add("IsKnownMatch", [bool]) | Out-Null
         
         # Add rows to the DataTable
         foreach ($item in $global:reportData) {
@@ -494,6 +643,7 @@ $btnRun.Add_Click({
             $row["SourceTable"] = $item.SourceTable
             $row["SourceField"] = $item.SourceField
             $row["Score"] = $item.Score
+            $row["IsKnownMatch"] = $item.IsKnownMatch
             $dtReq.Rows.Add($row)
         }
         
@@ -504,12 +654,20 @@ $btnRun.Add_Click({
             $dtReq.Rows.Add($row)
         }
         
-        # Create a BindingSource
+        # Create a BindingSource and set the DataSource
         $bs = New-Object System.Windows.Forms.BindingSource
         $bs.DataSource = $dtReq
         
         # Set the DataSource to the BindingSource
         $dgvRequirements.DataSource = $bs
+        
+        # Make sure the IsKnownMatch column is hidden in the UI
+        foreach ($col in $dgvRequirements.Columns) {
+            if ($col.Name -eq "IsKnownMatch") {
+                $col.Visible = $false
+                break
+            }
+        }
         
         # Apply formatting to Requirements grid
         Apply-RequirementsFormatting -Grid $dgvRequirements
@@ -519,9 +677,8 @@ $btnRun.Add_Click({
         
         # Create DataTable for Source audit
         $dtSource = New-Object System.Data.DataTable
-        foreach ($prop in @("SourceTable", "UnmatchedField")) {
-            [void]$dtSource.Columns.Add($prop)
-        }
+        $dtSource.Columns.Add("SourceTable", [string]) | Out-Null
+        $dtSource.Columns.Add("UnmatchedField", [string]) | Out-Null
         
         # Add rows to the DataTable
         foreach ($item in $unmatchedReport) {
@@ -538,7 +695,7 @@ $btnRun.Add_Click({
             $dtSource.Rows.Add($row)
         }
         
-        # Create a BindingSource
+        # Create a BindingSource for Source grid
         $bsSource = New-Object System.Windows.Forms.BindingSource
         $bsSource.DataSource = $dtSource
         
@@ -609,6 +766,12 @@ $btnSave.Add_Click({
                             SourceField = $row.Cells["SourceField"].Value
                             Score = $row.Cells["Score"].Value
                         }
+                        
+                        # Add IsKnownMatch if it exists (helps preserve this info for later use)
+                        if ($row.DataBoundItem -and $row.DataBoundItem.Row.Table.Columns.Contains("IsKnownMatch")) {
+                            $obj | Add-Member -MemberType NoteProperty -Name "IsKnownMatch" -Value $row.DataBoundItem.Row["IsKnownMatch"]
+                        }
+                        
                         $data += $obj
                     }
                     $data | Export-Csv -Path $saveFileDlg.FileName -NoTypeInformation -Force
