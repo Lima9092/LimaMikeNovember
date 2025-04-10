@@ -399,7 +399,7 @@ function Apply-RequirementsFormatting {
         }
         # Highlight known matches with amber
         elseif ($isKnownMatch) {
-            $row.Cells["SourceField"].Style.BackColor = [System.Drawing.Color]::Orange
+            $row.Cells["SourceField"].Style.BackColor = [System.Drawing.Color]::PeachPuff
         }
     }
 }
