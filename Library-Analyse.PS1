@@ -287,120 +287,235 @@ $cboTransform.Location = New-Object System.Drawing.Point($leftXControl, ($startY
 $cboTransform.Size = New-Object System.Drawing.Size(200, 20)
 $cboTransform.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
 
-# Populate the transformation combo box
+$mapEditGroupBox.Controls.Add($cboTransform)
+
+# Populate transform dropdown
 $cboTransform.Items.Clear()
-$cboTransform.Items.Add("None")
+$cboTransform.Items.Add('None')
 foreach ($func in $global:TransformationFunctions) {
     $cboTransform.Items.Add($func)
 }
-$cboTransform.Items.Add("New Custom Text...")
+$cboTransform.Items.Add('New Custom Text...')
+$cboTransform.Items.Add('New Custom Prefix...')
+$cboTransform.Items.Add('New Custom Suffix...')
 $cboTransform.SelectedIndex = 0
 
-$mapEditGroupBox.Controls.Add($cboTransform)
-
-# --------------------------------------------------
-# EVENT: If "New Custom Text..." is selected
-# --------------------------------------------------
+# When user picks one of the "New Custom…" items, show the right popup
 $cboTransform.Add_SelectedIndexChanged({
-    if ($cboTransform.SelectedItem -eq "New Custom Text...") {
-        # Show popup form
-        $popupForm = New-Object System.Windows.Forms.Form
-        $popupForm.Text = "Enter Custom Text"
-        $popupForm.Size = New-Object System.Drawing.Size(300, 150)
-        $popupForm.StartPosition = "CenterParent"
-        
-        $lblCustom = New-Object System.Windows.Forms.Label
-        $lblCustom.Text = "Custom Text:"
-        $lblCustom.Location = New-Object System.Drawing.Point(10, 10)
-        $lblCustom.Size = New-Object System.Drawing.Size(80, 20)
-        $popupForm.Controls.Add($lblCustom)
-        
-        $txtCustom = New-Object System.Windows.Forms.TextBox
-        $txtCustom.Location = New-Object System.Drawing.Point(100, 10)
-        $txtCustom.Size = New-Object System.Drawing.Size(150, 20)
-        $popupForm.Controls.Add($txtCustom)
-        
-        $btnOK = New-Object System.Windows.Forms.Button
-        $btnOK.Text = "OK"
-        $btnOK.Location = New-Object System.Drawing.Point(100, 50)
-        $btnOK.Size = New-Object System.Drawing.Size(80, 30)
-        $popupForm.Controls.Add($btnOK)
+    switch ($cboTransform.SelectedItem) {
+        'New Custom Text...'   { Show-CustomTextPopup }
+        'New Custom Prefix...' { Show-CustomAffixPopup -Type 'Prefix' }
+        'New Custom Suffix...' { Show-CustomAffixPopup -Type 'Suffix' }
+    }
+})
 
-        $btnCancel = New-Object System.Windows.Forms.Button
-        $btnCancel.Text = "Cancel"
-        $btnCancel.Location = New-Object System.Drawing.Point(190, 50)
-        $btnCancel.Size = New-Object System.Drawing.Size(80, 30)
-        $popupForm.Controls.Add($btnCancel)
+# Popup for "New Custom Text…"
+function Show-CustomTextPopup {
+    $popup = New-Object System.Windows.Forms.Form
+    $popup.Text            = 'Enter Custom Text'
+    $popup.Size            = New-Object System.Drawing.Size(300,150)
+    $popup.StartPosition   = 'CenterParent'
+    $popup.FormBorderStyle = 'FixedDialog'
+    $popup.MaximizeBox     = $false
+    $popup.MinimizeBox     = $false
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text     = 'Custom Text:'
+    $lbl.Location = New-Object System.Drawing.Point(10,10)
+    $lbl.Size     = New-Object System.Drawing.Size(80,20)
+
+    $txt = New-Object System.Windows.Forms.TextBox
+    $txt.Location = New-Object System.Drawing.Point(100,10)
+    $txt.Size     = New-Object System.Drawing.Size(150,20)
+
+    $btnOK = New-Object System.Windows.Forms.Button
+    $btnOK.Text = 'OK'
+    $btnOK.Location = New-Object System.Drawing.Point(100,50)
+    $btnOK.Size     = New-Object System.Drawing.Size(80,30)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = 'Cancel'
+    $btnCancel.Location = New-Object System.Drawing.Point(190,50)
+    $btnCancel.Size     = New-Object System.Drawing.Size(80,30)
+
+    $popup.Controls.AddRange(@($lbl,$txt,$btnOK,$btnCancel))
+
+    $btnOK.Add_Click({
+        if ([string]::IsNullOrWhiteSpace($txt.Text)) { 
+            $cboTransform.SelectedIndex = 0  # Reset to "None" if empty
+            $popup.Close()
+            return 
+        }
         
-        $btnOK.Add_Click({
-            if (-not [string]::IsNullOrWhiteSpace($txtCustom.Text)) {
-                $customText = $txtCustom.Text.Trim()
-
-                # 1) Sanitize the function name
-                $sanitized = ($customText -replace "\s+", "-") -replace "[^A-Za-z0-9\-]", ""
-                if (-not $sanitized) { $sanitized = "Custom" }
-                $newFuncName = "Custom-Text-" + $sanitized
-
-                # 2) Build the function code to append
-                $escapedText = $customText -replace "'", "''"
-                $newFuncDef = @"
+        $customText = $txt.Text.Trim()
+        
+        # Sanitize the function name
+        $sanitized = ($customText -replace "\s+", "-") -replace "[^A-Za-z0-9\-]", ""
+        if (-not $sanitized) { $sanitized = "Custom" }
+        $newFuncName = "Custom-Text-" + $sanitized
+        
+        # Build the function code to append
+        $escapedText = $customText -replace "'", "''"
+        $newFuncDef = @"
 function $newFuncName(`$value) {
     return '$escapedText'
 }
 `$global:TransformFunctions["$newFuncName"] = `${function:$newFuncName}
 
 "@ + "`r`n"
-
-                # 3) Read the current file (create if needed), then just APPEND
-                if (-not (Test-Path $global:ProcessScript)) {
-                    New-Item -Path $global:ProcessScript -ItemType File -Force | Out-Null
-                }
-                Add-Content -Path $global:ProcessScript -Value $newFuncDef -Encoding UTF8
-
-                # 4) Dot-source so it's available now
-                . $global:ProcessScript
-
-                # 5) Rebuild $global:TransformFunctions for the GUI
-                $global:TransformFunctions = @{}
-                $funcs = Get-Command -CommandType Function | Where-Object {
-                    $_.Name -like "*Transform" -or $_.Name -like "Custom-Text*"
-                }
-                foreach ($f in $funcs) {
-                    $global:TransformFunctions[$f.Name] = ${function:$($f.Name)}
-                }
-
-                # 6) Refresh the combo box
-                $cboTransform.Items.Clear()
-                $cboTransform.Items.Add("None")
-                foreach ($key in $global:TransformFunctions.Keys) {
-                    $cboTransform.Items.Add($key)
-                }
-                $cboTransform.Items.Add("New Custom Text...")
-
-                # Select the newly created function
-                $index = $cboTransform.Items.IndexOf($newFuncName)
-                if ($index -ge 0) {
-                    $cboTransform.SelectedIndex = $index
-                }
-                else {
-                    $cboTransform.SelectedIndex = 0
-                }
-            }
-            else {
-                # No text => revert to "None"
-                $cboTransform.SelectedIndex = 0
-            }
-            $popupForm.Close()
-        })
         
-        $btnCancel.Add_Click({
+        # Read the current file (create if needed), then APPEND
+        if (-not (Test-Path $global:ProcessScript)) {
+            New-Item -Path $global:ProcessScript -ItemType File -Force | Out-Null
+        }
+        Add-Content -Path $global:ProcessScript -Value $newFuncDef -Encoding UTF8
+        
+        # Dot-source so it's available now
+        . $global:ProcessScript
+        
+        # Rebuild the function list
+        $global:TransformationFunctions = Get-Command -CommandType Function | 
+            Where-Object { $_.Name -like "*Transform" -or $_.Name -like "Custom*" } | 
+            Select-Object -ExpandProperty Name
+        
+        # Refresh combo box
+        $cboTransform.Items.Clear()
+        $cboTransform.Items.Add('None')
+        foreach ($func in $global:TransformationFunctions) {
+            $cboTransform.Items.Add($func)
+        }
+        $cboTransform.Items.Add('New Custom Text...')
+        $cboTransform.Items.Add('New Custom Prefix...')
+        $cboTransform.Items.Add('New Custom Suffix...')
+        
+        # Select the newly created function
+        $index = $cboTransform.Items.IndexOf($newFuncName)
+        if ($index -ge 0) {
+            $cboTransform.SelectedIndex = $index
+        } else {
             $cboTransform.SelectedIndex = 0
-            $popupForm.Close()
-        })
+        }
         
-        $popupForm.ShowDialog()
-    }
-})
+        $popup.Close()
+    })
+    
+    $btnCancel.Add_Click({ 
+        $cboTransform.SelectedIndex = 0  # Reset to "None"
+        $popup.Close() 
+    })
+    
+    $popup.ShowDialog()
+}
+
+# Popup for "New Custom Prefix…" and "New Custom Suffix…"
+function Show-CustomAffixPopup {
+    param([ValidateSet('Prefix','Suffix')][string]$Type)
+
+    # Build the popup form
+    $popup = New-Object System.Windows.Forms.Form
+    $popup.Text            = "Enter Custom $Type"
+    $popup.Size            = New-Object System.Drawing.Size(300,150)
+    $popup.StartPosition   = 'CenterParent'
+    $popup.FormBorderStyle = 'FixedDialog'
+    $popup.MaximizeBox     = $false
+    $popup.MinimizeBox     = $false
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text     = "$Type Text:"
+    $lbl.Location = New-Object System.Drawing.Point(10,10)
+    $lbl.Size     = New-Object System.Drawing.Size(80,20)
+
+    $txt = New-Object System.Windows.Forms.TextBox
+    $txt.Location = New-Object System.Drawing.Point(100,10)
+    $txt.Size     = New-Object System.Drawing.Size(150,20)
+
+    $btnOK = New-Object System.Windows.Forms.Button
+    $btnOK.Text     = 'OK'
+    $btnOK.Location = New-Object System.Drawing.Point(100,50)
+    $btnOK.Size     = New-Object System.Drawing.Size(80,30)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text     = 'Cancel'
+    $btnCancel.Location = New-Object System.Drawing.Point(190,50)
+    $btnCancel.Size     = New-Object System.Drawing.Size(80,30)
+
+    $popup.Controls.AddRange(@($lbl,$txt,$btnOK,$btnCancel))
+
+    $btnOK.Add_Click({
+        if ([string]::IsNullOrWhiteSpace($txt.Text)) { 
+            $cboTransform.SelectedIndex = 0  # Reset to "None" if empty
+            $popup.Close()
+            return 
+        }
+
+        $custom = $txt.Text.Trim()
+        # Sanitize for function name
+        $sanitized = ($custom -replace "\s+", "-") -replace "[^A-Za-z0-9\-]", ""
+        if (-not $sanitized) { $sanitized = "Value" }
+        $newFuncName = "Custom-$Type-$sanitized"
+        $escaped = $custom -replace "'", "''"
+
+        # Create function definition based on type
+        if ($Type -eq 'Prefix') {
+            $newFuncDef = @"
+function $newFuncName(`$value) {
+    return '$escaped' + `$value
+}
+`$global:TransformFunctions["$newFuncName"] = `${function:$newFuncName}
+
+"@ + "`r`n"
+        } else {
+            $newFuncDef = @"
+function $newFuncName(`$value) {
+    return `$value + '$escaped'
+}
+`$global:TransformFunctions["$newFuncName"] = `${function:$newFuncName}
+
+"@ + "`r`n"
+        }
+
+        # Ensure file exists and append
+        if (-not (Test-Path $global:ProcessScript)) {
+            New-Item -Path $global:ProcessScript -ItemType File -Force | Out-Null
+        }
+        Add-Content -Path $global:ProcessScript -Value $newFuncDef -Encoding UTF8
+
+        # Dot-source to load the new function & mapping
+        . $global:ProcessScript
+
+        # Rebuild the function list
+        $global:TransformationFunctions = Get-Command -CommandType Function | 
+            Where-Object { $_.Name -like "*Transform" -or $_.Name -like "Custom*" } | 
+            Select-Object -ExpandProperty Name
+
+        # Refresh combo box
+        $cboTransform.Items.Clear()
+        $cboTransform.Items.Add('None')
+        foreach ($func in $global:TransformationFunctions) {
+            $cboTransform.Items.Add($func)
+        }
+        $cboTransform.Items.Add('New Custom Text...')
+        $cboTransform.Items.Add('New Custom Prefix...')
+        $cboTransform.Items.Add('New Custom Suffix...')
+        
+        # Select the newly created function
+        $index = $cboTransform.Items.IndexOf($newFuncName)
+        if ($index -ge 0) {
+            $cboTransform.SelectedIndex = $index
+        } else {
+            $cboTransform.SelectedIndex = 0
+        }
+        
+        $popup.Close()
+    })
+    
+    $btnCancel.Add_Click({ 
+        $cboTransform.SelectedIndex = 0  # Reset to "None"
+        $popup.Close() 
+    })
+    
+    $popup.ShowDialog()
+}
 
 # Row 4: Update Mapping button (aligned left)
 $btnUpdateMapping = New-Object System.Windows.Forms.Button
