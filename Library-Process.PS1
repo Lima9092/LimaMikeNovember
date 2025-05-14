@@ -585,6 +585,7 @@ $grid.Add_CellFormatting({
 
 function Load-Files {
     $global:ErrorCells.Clear()
+	$global:ShowOnlyMappedFields = $false   
     $txtLog.Text = "Starting file loading process..."
 
     # Clear the grid
@@ -701,7 +702,7 @@ function Load-Files {
         $txtLog.Text += "`r`nDetected columns in processed data: $($columns -join ', ')"
         
         # Use the Update-GridView function to populate the grid
-        Update-GridView
+        Show-MappedOnly
         
         $txtLog.Text += "`r`nData loaded successfully. Found $($global:ProcessedData.Count) records."
         
