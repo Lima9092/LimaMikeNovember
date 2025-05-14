@@ -65,17 +65,14 @@ function SName-FirstTransform {
 }
 $global:TransformFunctions['SName-FirstTransform'] = ${function:SName-FirstTransform}
 
-
-$global:TransformFunctions["BorrowerTypeTransform"]    = ${function:BorrowerTypeTransform}
-
-
-function Adult-fictionTransform($value) {
-    return 'Adult fiction'
+function AdultFictionTransform($value) {
+    # If the incoming value starts with 489 or 499, return “Adult-fiction”
+    if ($value -match '^(489|499)') {
+        return 'Adult-fiction'
+    }
+    # otherwise return a blank string
+    return ''
 }
-$global:TransformFunctions["Adult-fictionTransform"] = ${function:Adult-fictionTransform}
 
-
-function parentFlag0Transform($value) {
-    return '0'
-}
-$global:TransformFunctions["parentFlag0Transform"] = ${function:parentFlag0Transform}
+# Register it in your in‐memory lookup
+$global:TransformFunctions['AdultFictionTransform'] = ${function:AdultFictionTransform}
