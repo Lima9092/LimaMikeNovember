@@ -32,7 +32,10 @@ $global:LogOutput = ""
 
 $global:ProcessScript = ".\Transform-Functions.ps1"
 . $global:ProcessScript
-$global:TransformationFunctions = @(Get-Command -CommandType Function | Where-Object { $_.Name -like "*Transform" -or $_.Name -like "Custom-Text*" } | Select-Object -ExpandProperty Name)
+$global:TransformationFunctions = Get-Command -CommandType Function |
+	Where-Object { $_.Name -like '*Transform' -or $_.Name -like 'Custom*' } |
+	Sort-Object Name |
+	Select-Object -ExpandProperty Name
 
 # Create main form
 $mainForm = New-Object System.Windows.Forms.Form
