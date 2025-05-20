@@ -101,4 +101,69 @@ function Show-LoanUserMapper {
                 $borrowed = if ($borrowedKey) { $rowData[$borrowedKey] } else { '' }
                 $borrowedDate = if ($borrowedDateKey) { $rowData[$borrowedDateKey] } else { '' }
 
-                $barcode = ''; $borrow
+                $barcode = ''; $borrowedTitle = $borrowed
+                if ($borrowed -match '^(.*?)\s*\((\d+)\)') {
+                    $borrowedTitle = $matches[1].Trim()
+                    $barcode = $matches[2]
+                }
+
+                $borrowedByKey = $rowData.Keys | Where-Object { $_ -like 'Borrowed By*' } | Select-Object -First 1
+                $originalBorrower = if ($borrowedByKey) { $rowData[$borrowedByKey] } else { '' }
+
+                $borrowedByFormatted = $originalBorrower
+                $userBarcode = ''
+
+                if ($originalBorrower -match '^(\S+)\s+(.+)$') {
+                    $firstname = $matches[1]
+                    $surname = $matches[2]
+                    $borrowedByFormatted = "$surname, $firstname"
+                    $lookupKey = "$firstname $surname"
+
+                    if ($userLookup.ContainsKey($lookupKey.ToLower())) {
+                        $userBarcode = $userLookup[$lookupKey.ToLower()]
+                    } elseif ($rawNameToUsername.ContainsKey($originalBorrower.ToLower())) {
+                        $userBarcode = $rawNameToUsername[$originalBorrower.ToLower()]
+                    }
+                }
+
+                $newLoan = [ordered]@{}
+                foreach ($k in $rowData.Keys) {
+                    if ($k -eq $borrowedKey) {
+                        $newLoan['Borrowed (Raw)'] = $borrowed
+                        $newLoan['Borrowed Title'] = $borrowedTitle
+                        $newLoan['Item Barcode'] = $barcode
+                    } elseif ($k -eq $borrowedDateKey) {
+                        $newLoan['Borrowed Date'] = $borrowedDate
+                    } elseif ($k -eq $borrowedByKey) {
+                        $newLoan['Borrowed By'] = $borrowedByFormatted
+                        $newLoan['Username'] = $userBarcode
+                    } elseif ($k -ne '') {
+                        $newLoan[$k] = $rowData[$k]
+                    }
+                }
+
+                $cleanedLoans += [PSCustomObject]$newLoan
+            }
+
+            $cleanedLoans | Export-Csv -Path $txtOut.Text -NoTypeInformation
+            $lblStatus.Text = "Status: Done! Processed $($cleanedLoans.Count) loans and saved to $($txtOut.Text)"
+        }
+        catch {
+            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Error', 'OK', 'Error')
+            $lblStatus.Text = "Status: Error - $($_.Exception.Message)"
+        }
+    })
+
+    $lblStatus = New-Object System.Windows.Forms.Label -Property @{Text='Status: Ready';Location='10,190';Width=560;Height=80;AutoSize=$false}
+
+    $form.Controls.AddRange(@(
+        $lblLoans, $txtLoans, $btnLoans,
+        $lblUsers, $txtUsers, $btnUsers,
+        $lblOut, $txtOut, $btnOut,
+        $btnRun, $lblStatus
+    ))
+
+    [void]$form.ShowDialog()
+}
+
+Show-LoanUserMapper
