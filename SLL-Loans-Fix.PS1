@@ -86,6 +86,10 @@ function Show-LoanUserMapper {
                 }
             }
 
+            # Log header information to status
+            $lblStatus.Text = "Status: Processing... Found headers: $($fixedHeaders -join ', ')"
+            $form.Refresh()
+
             # Simpler date conversion function
             function Convert-DateFormat {
                 param(
@@ -119,14 +123,18 @@ function Show-LoanUserMapper {
                     $rowData[$fixedHeaders[$j]] = $values[$j]
                 }
 
-                # Find the relevant keys
-                $borrowedTitleKey = $fixedHeaders | Where-Object { $_ -eq 'Borrowed' } | Select-Object -First 1
-                $borrowedDateKey = $fixedHeaders | Where-Object { $_ -eq 'Borrowed_1' -or $_ -eq 'BorrowedDate' } | Select-Object -First 1
-                $borrowedByKey = $fixedHeaders | Where-Object { $_ -like 'Borrowed By*' } | Select-Object -First 1
-                $returnDueDateKey = $fixedHeaders | Where-Object { $_ -like '*Date Return Due*' } | Select-Object -First 1
-
-                # Status updates to help debugging
-                [System.Windows.Forms.MessageBox]::Show("Borrowed Title Key: $borrowedTitleKey`nBorrowed Date Key: $borrowedDateKey`nBorrowed By Key: $borrowedByKey`nReturn Due Date Key: $returnDueDateKey", "Keys Found")
+                # Find the relevant keys - do this only once outside the loop
+                if ($i -eq 1) {
+                    $borrowedKeys = $fixedHeaders | Where-Object { $_ -like 'Borrowed*' }
+                    $borrowedTitleKey = $borrowedKeys[0]
+                    $borrowedDateKey = if ($borrowedKeys.Count -gt 1) { $borrowedKeys[1] } else { '' }
+                    $borrowedByKey = $fixedHeaders | Where-Object { $_ -like 'Borrowed By*' } | Select-Object -First 1
+                    $returnDueDateKey = $fixedHeaders | Where-Object { $_ -like '*Date Return Due*' } | Select-Object -First 1
+                    
+                    # Update status with key information
+                    $lblStatus.Text = "Status: Processing... Using keys: Title=$borrowedTitleKey, Date=$borrowedDateKey"
+                    $form.Refresh()
+                }
 
                 # Extract values
                 $borrowed = if ($borrowedTitleKey -and $rowData.ContainsKey($borrowedTitleKey)) { $rowData[$borrowedTitleKey] } else { '' }
