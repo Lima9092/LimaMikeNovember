@@ -87,6 +87,7 @@ function Show-LoanUserMapper {
             }
 
             function Convert-DateToNumericFormat($inputDate) {
+                $parsedDate = $null
                 if ([datetime]::TryParseExact($inputDate, 'dd MMM yyyy', $null, [System.Globalization.DateTimeStyles]::None, [ref]$parsedDate)) {
                     return $parsedDate.ToString('dd/MM/yyyy')
                 } else {
