@@ -71,16 +71,26 @@ function Show-LoanUserMapper {
             $csvLines = Get-Content -Path $txtLoans.Text
             if ($csvLines.Count -le 1) { throw "Loans CSV file appears to be empty or contains only headers" }
 
-            $headers = $csvLines[0].Split(',') | Where-Object { $_.Trim('"') -ne '' } | ForEach-Object { $_.Trim('"') }
+            $headers = $csvLines[0].Split(',') | ForEach-Object { $_.Trim('"') }
             $fixedHeaders = @(); $headerCount = @{}
 
             foreach ($header in $headers) {
-                if (-not $headerCount.ContainsKey($header)) {
-                    $headerCount[$header] = 0
-                    $fixedHeaders += $header
+                if ($header -ne '') {
+                    if (-not $headerCount.ContainsKey($header)) {
+                        $headerCount[$header] = 0
+                        $fixedHeaders += $header
+                    } else {
+                        $headerCount[$header]++
+                        $fixedHeaders += "$($header)_$($headerCount[$header])"
+                    }
+                }
+            }
+
+            function Convert-DateToNumericFormat($inputDate) {
+                if ([datetime]::TryParseExact($inputDate, 'dd MMM yyyy', $null, [System.Globalization.DateTimeStyles]::None, [ref]$parsedDate)) {
+                    return $parsedDate.ToString('dd/MM/yyyy')
                 } else {
-                    $headerCount[$header]++
-                    $fixedHeaders += "$($header)_$($headerCount[$header])"
+                    return $inputDate
                 }
             }
 
@@ -96,10 +106,14 @@ function Show-LoanUserMapper {
                     $rowData[$fixedHeaders[$j]] = $values[$j]
                 }
 
-                $borrowedKey = $fixedHeaders | Where-Object { $_ -eq 'Borrowed' } | Select-Object -First 1
-                $borrowedDateKey = $fixedHeaders | Where-Object { $_ -eq 'Borrowed' } | Select-Object -Skip 1 -First 1
+                $borrowedKeys = $fixedHeaders | Where-Object { $_ -like 'Borrowed*' }
+                $borrowedKey = $borrowedKeys[0]
+                $borrowedDateKey = if ($borrowedKeys.Count -gt 1) { $borrowedKeys[1] } else { '' }
+
                 $borrowed = if ($borrowedKey) { $rowData[$borrowedKey] } else { '' }
                 $borrowedDate = if ($borrowedDateKey) { $rowData[$borrowedDateKey] } else { '' }
+
+                $borrowedDate = Convert-DateToNumericFormat $borrowedDate
 
                 $barcode = ''; $borrowedTitle = $borrowed
                 if ($borrowed -match '^(.*?)\s*\((\d+)\)') {
@@ -127,18 +141,28 @@ function Show-LoanUserMapper {
                 }
 
                 $newLoan = [ordered]@{}
-                foreach ($k in $rowData.Keys) {
-                    if ($k -eq $borrowedKey) {
-                        $newLoan['Borrowed (Raw)'] = $borrowed
-                        $newLoan['Borrowed Title'] = $borrowedTitle
-                        $newLoan['Item Barcode'] = $barcode
-                    } elseif ($k -eq $borrowedDateKey) {
-                        $newLoan['Borrowed Date'] = $borrowedDate
-                    } elseif ($k -eq $borrowedByKey) {
-                        $newLoan['Borrowed By'] = $borrowedByFormatted
-                        $newLoan['Username'] = $userBarcode
-                    } elseif ($k -ne '') {
-                        $newLoan[$k] = $rowData[$k]
+                foreach ($k in $fixedHeaders) {
+                    if (-not $rowData.ContainsKey($k)) { continue }
+                    switch ($k) {
+                        { $_ -eq $borrowedKey } {
+                            $newLoan['Borrowed (Raw)'] = $borrowed
+                            $newLoan['Borrowed Title'] = $borrowedTitle
+                            $newLoan['Item Barcode'] = $barcode
+                        }
+                        { $_ -eq $borrowedDateKey } {
+                            $newLoan['Borrowed Date'] = $borrowedDate
+                        }
+                        { $_ -eq $borrowedByKey } {
+                            $newLoan['Borrowed By'] = $borrowedByFormatted
+                            $newLoan['Username'] = $userBarcode
+                        }
+                        default {
+                            $value = $rowData[$k]
+                            if ($k -like '*Date*') {
+                                $value = Convert-DateToNumericFormat $value
+                            }
+                            $newLoan[$k] = $value
+                        }
                     }
                 }
 
