@@ -113,6 +113,22 @@ function Show-LoanUserMapper {
 
             $cleanedLoans = @()
 
+            # Find key indices to ensure correct handling
+            $borrowedTitleIndex = $fixedHeaders.IndexOf(($fixedHeaders | Where-Object { $_ -eq 'Borrowed' } | Select-Object -First 1))
+            $borrowedDateIndex = $fixedHeaders.IndexOf(($fixedHeaders | Where-Object { $_ -eq 'Borrowed_1' } | Select-Object -First 1))
+            $borrowedByIndex = $fixedHeaders.IndexOf(($fixedHeaders | Where-Object { $_ -like 'Borrowed By*' } | Select-Object -First 1))
+            $returnDueDateIndex = $fixedHeaders.IndexOf(($fixedHeaders | Where-Object { $_ -like '*Date Return Due*' } | Select-Object -First 1))
+            
+            # Get the actual headers by index to ensure we're using the correct names
+            $borrowedTitleKey = if ($borrowedTitleIndex -ge 0) { $fixedHeaders[$borrowedTitleIndex] } else { $null }
+            $borrowedDateKey = if ($borrowedDateIndex -ge 0) { $fixedHeaders[$borrowedDateIndex] } else { $null }
+            $borrowedByKey = if ($borrowedByIndex -ge 0) { $fixedHeaders[$borrowedByIndex] } else { $null }
+            $returnDueDateKey = if ($returnDueDateIndex -ge 0) { $fixedHeaders[$returnDueDateIndex] } else { $null }
+            
+            # Update status with key information for debugging
+            $lblStatus.Text = "Status: Processing... Using keys: Title=$borrowedTitleKey, Date=$borrowedDateKey, By=$borrowedByKey"
+            $form.Refresh()
+
             for ($i = 1; $i -lt $csvLines.Count; $i++) {
                 $line = $csvLines[$i]
                 if ([string]::IsNullOrWhiteSpace($line)) { continue }
@@ -123,22 +139,10 @@ function Show-LoanUserMapper {
                     $rowData[$fixedHeaders[$j]] = $values[$j]
                 }
 
-                # Find the relevant keys - do this only once outside the loop
-                if ($i -eq 1) {
-                    $borrowedKeys = $fixedHeaders | Where-Object { $_ -like 'Borrowed*' }
-                    $borrowedTitleKey = $borrowedKeys[0]
-                    $borrowedDateKey = if ($borrowedKeys.Count -gt 1) { $borrowedKeys[1] } else { '' }
-                    $borrowedByKey = $fixedHeaders | Where-Object { $_ -like 'Borrowed By*' } | Select-Object -First 1
-                    $returnDueDateKey = $fixedHeaders | Where-Object { $_ -like '*Date Return Due*' } | Select-Object -First 1
-                    
-                    # Update status with key information
-                    $lblStatus.Text = "Status: Processing... Using keys: Title=$borrowedTitleKey, Date=$borrowedDateKey"
-                    $form.Refresh()
-                }
-
                 # Extract values
                 $borrowed = if ($borrowedTitleKey -and $rowData.ContainsKey($borrowedTitleKey)) { $rowData[$borrowedTitleKey] } else { '' }
                 $borrowedDate = if ($borrowedDateKey -and $rowData.ContainsKey($borrowedDateKey)) { $rowData[$borrowedDateKey] } else { '' }
+                $originalBorrower = if ($borrowedByKey -and $rowData.ContainsKey($borrowedByKey)) { $rowData[$borrowedByKey] } else { '' }
                 $returnDueDate = if ($returnDueDateKey -and $rowData.ContainsKey($returnDueDateKey)) { $rowData[$returnDueDateKey] } else { '' }
 
                 # Convert dates
@@ -153,7 +157,6 @@ function Show-LoanUserMapper {
                 }
 
                 # Process borrower information
-                $originalBorrower = if ($borrowedByKey -and $rowData.ContainsKey($borrowedByKey)) { $rowData[$borrowedByKey] } else { '' }
                 $borrowedByFormatted = $originalBorrower
                 $userBarcode = ''
 
@@ -170,7 +173,7 @@ function Show-LoanUserMapper {
                     }
                 }
 
-                # Create new loan record
+                # Create new loan record with explicitly named fields
                 $newLoan = [ordered]@{
                     'Borrowed (Raw)' = $borrowed
                     'Borrowed Title' = $borrowedTitle
@@ -188,6 +191,7 @@ function Show-LoanUserMapper {
                     
                     if ($rowData.ContainsKey($k)) {
                         $value = $rowData[$k]
+                        # Convert any date fields
                         if ($k -like '*Date*') {
                             $value = Convert-DateFormat $value
                         }
