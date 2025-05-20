@@ -149,8 +149,10 @@ function Show-LoanUserMapper {
                             $newLoan['Borrowed Title'] = $borrowedTitle
                             $newLoan['Item Barcode'] = $barcode
                         }
-                        { $_ -eq $borrowedDateKey } {
-                            $newLoan['Borrowed Date'] = $borrowedDate
+                        { $_ -eq $borrowedDateKey -or $_ -eq 'Borrowed_1' } {  # Added -or $_ -eq 'Borrowed_1'
+                            # Make sure to convert the date format
+                            $dateValue = Convert-DateToNumericFormat $rowData[$k]
+                            $newLoan['Borrowed Date'] = $dateValue  # Always use 'Borrowed Date' as the column name
                         }
                         { $_ -eq $borrowedByKey } {
                             $newLoan['Borrowed By'] = $borrowedByFormatted
