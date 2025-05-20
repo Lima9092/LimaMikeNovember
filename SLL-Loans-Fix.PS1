@@ -86,21 +86,24 @@ function Show-LoanUserMapper {
                 }
             }
 
-            function Convert-DateToNumericFormat($inputDate) {
-                # Create a variable to hold the output date
-                $parsedDate = $null
+            # Simpler date conversion function
+            function Convert-DateFormat {
+                param(
+                    [string]$Date
+                )
                 
-                # Use the correct syntax for PowerShell's TryParseExact
-                if ([DateTime]::TryParseExact(
-                        $inputDate,                              # Input string
-                        'dd MMM yyyy',                           # Format string
-                        [System.Globalization.CultureInfo]::InvariantCulture,  # Format provider
-                        [System.Globalization.DateTimeStyles]::None,  # DateTimeStyles
-                        [ref]$parsedDate))                       # Output parameter
-                {
-                    return $parsedDate.ToString('dd/MM/yyyy')
-                } else {
-                    return $inputDate
+                if ([string]::IsNullOrEmpty($Date)) {
+                    return $Date
+                }
+                
+                try {
+                    # Try parsing with standard date formats
+                    $parsedDate = [DateTime]::Parse($Date)
+                    return $parsedDate.ToString("dd/MM/yyyy")
+                }
+                catch {
+                    # If parsing fails, return the original string
+                    return $Date
                 }
             }
 
@@ -116,28 +119,33 @@ function Show-LoanUserMapper {
                     $rowData[$fixedHeaders[$j]] = $values[$j]
                 }
 
-                $borrowedKeys = $fixedHeaders | Where-Object { $_ -like 'Borrowed*' }
-                $borrowedKey = $borrowedKeys[0]
-                $borrowedDateKey = if ($borrowedKeys.Count -gt 1) { $borrowedKeys[1] } else { '' }
+                # Find the relevant keys
+                $borrowedTitleKey = $fixedHeaders | Where-Object { $_ -eq 'Borrowed' } | Select-Object -First 1
+                $borrowedDateKey = $fixedHeaders | Where-Object { $_ -eq 'Borrowed_1' -or $_ -eq 'BorrowedDate' } | Select-Object -First 1
+                $borrowedByKey = $fixedHeaders | Where-Object { $_ -like 'Borrowed By*' } | Select-Object -First 1
+                $returnDueDateKey = $fixedHeaders | Where-Object { $_ -like '*Date Return Due*' } | Select-Object -First 1
 
-                # Debug output for borrowed keys
-                Write-Host "Found borrowed keys: $($borrowedKeys -join ', ')"
-                Write-Host "Using borrowedKey: $borrowedKey, borrowedDateKey: $borrowedDateKey"
+                # Status updates to help debugging
+                [System.Windows.Forms.MessageBox]::Show("Borrowed Title Key: $borrowedTitleKey`nBorrowed Date Key: $borrowedDateKey`nBorrowed By Key: $borrowedByKey`nReturn Due Date Key: $returnDueDateKey", "Keys Found")
 
-                $borrowed = if ($borrowedKey) { $rowData[$borrowedKey] } else { '' }
-                $borrowedDate = if ($borrowedDateKey) { $rowData[$borrowedDateKey] } else { '' }
+                # Extract values
+                $borrowed = if ($borrowedTitleKey -and $rowData.ContainsKey($borrowedTitleKey)) { $rowData[$borrowedTitleKey] } else { '' }
+                $borrowedDate = if ($borrowedDateKey -and $rowData.ContainsKey($borrowedDateKey)) { $rowData[$borrowedDateKey] } else { '' }
+                $returnDueDate = if ($returnDueDateKey -and $rowData.ContainsKey($returnDueDateKey)) { $rowData[$returnDueDateKey] } else { '' }
 
-                $borrowedDate = Convert-DateToNumericFormat $borrowedDate
+                # Convert dates
+                $borrowedDate = Convert-DateFormat $borrowedDate
+                $returnDueDate = Convert-DateFormat $returnDueDate
 
+                # Parse item information
                 $barcode = ''; $borrowedTitle = $borrowed
                 if ($borrowed -match '^(.*?)\s*\((\d+)\)') {
                     $borrowedTitle = $matches[1].Trim()
                     $barcode = $matches[2]
                 }
 
-                $borrowedByKey = $rowData.Keys | Where-Object { $_ -like 'Borrowed By*' } | Select-Object -First 1
-                $originalBorrower = if ($borrowedByKey) { $rowData[$borrowedByKey] } else { '' }
-
+                # Process borrower information
+                $originalBorrower = if ($borrowedByKey -and $rowData.ContainsKey($borrowedByKey)) { $rowData[$borrowedByKey] } else { '' }
                 $borrowedByFormatted = $originalBorrower
                 $userBarcode = ''
 
@@ -154,29 +162,28 @@ function Show-LoanUserMapper {
                     }
                 }
 
-                $newLoan = [ordered]@{}
+                # Create new loan record
+                $newLoan = [ordered]@{
+                    'Borrowed (Raw)' = $borrowed
+                    'Borrowed Title' = $borrowedTitle
+                    'Item Barcode' = $barcode
+                    'Borrowed Date' = $borrowedDate
+                    'Borrowed By' = $borrowedByFormatted
+                    'Username' = $userBarcode
+                }
+
+                # Add any other fields (except the ones we've already processed)
                 foreach ($k in $fixedHeaders) {
-                    if (-not $rowData.ContainsKey($k)) { continue }
-                    switch ($k) {
-                        { $_ -eq $borrowedKey } {
-                            $newLoan['Borrowed (Raw)'] = $borrowed
-                            $newLoan['Borrowed Title'] = $borrowedTitle
-                            $newLoan['Item Barcode'] = $barcode
+                    if ($k -eq $borrowedTitleKey -or $k -eq $borrowedDateKey -or $k -eq $borrowedByKey) {
+                        continue # Skip fields we've already processed
+                    }
+                    
+                    if ($rowData.ContainsKey($k)) {
+                        $value = $rowData[$k]
+                        if ($k -like '*Date*') {
+                            $value = Convert-DateFormat $value
                         }
-                        { $_ -eq $borrowedDateKey } {
-                            $newLoan['Borrowed Date'] = $borrowedDate
-                        }
-                        { $_ -eq $borrowedByKey } {
-                            $newLoan['Borrowed By'] = $borrowedByFormatted
-                            $newLoan['Username'] = $userBarcode
-                        }
-                        default {
-                            $value = $rowData[$k]
-                            if ($k -like '*Date*') {
-                                $value = Convert-DateToNumericFormat $value
-                            }
-                            $newLoan[$k] = $value
-                        }
+                        $newLoan[$k] = $value
                     }
                 }
 
