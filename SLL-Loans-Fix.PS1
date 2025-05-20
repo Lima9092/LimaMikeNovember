@@ -87,7 +87,17 @@ function Show-LoanUserMapper {
             }
 
             function Convert-DateToNumericFormat($inputDate) {
-                if ([datetime]::TryParseExact($inputDate, 'dd MMM yyyy', $null, [System.Globalization.DateTimeStyles]::None, [ref]$parsedDate)) {
+                # Create a variable to hold the output date
+                $parsedDate = $null
+                
+                # Use the correct syntax for PowerShell's TryParseExact
+                if ([DateTime]::TryParseExact(
+                        $inputDate,                              # Input string
+                        'dd MMM yyyy',                           # Format string
+                        [System.Globalization.CultureInfo]::InvariantCulture,  # Format provider
+                        [System.Globalization.DateTimeStyles]::None,  # DateTimeStyles
+                        [ref]$parsedDate))                       # Output parameter
+                {
                     return $parsedDate.ToString('dd/MM/yyyy')
                 } else {
                     return $inputDate
@@ -109,6 +119,10 @@ function Show-LoanUserMapper {
                 $borrowedKeys = $fixedHeaders | Where-Object { $_ -like 'Borrowed*' }
                 $borrowedKey = $borrowedKeys[0]
                 $borrowedDateKey = if ($borrowedKeys.Count -gt 1) { $borrowedKeys[1] } else { '' }
+
+                # Debug output for borrowed keys
+                Write-Host "Found borrowed keys: $($borrowedKeys -join ', ')"
+                Write-Host "Using borrowedKey: $borrowedKey, borrowedDateKey: $borrowedDateKey"
 
                 $borrowed = if ($borrowedKey) { $rowData[$borrowedKey] } else { '' }
                 $borrowedDate = if ($borrowedDateKey) { $rowData[$borrowedDateKey] } else { '' }
@@ -149,10 +163,8 @@ function Show-LoanUserMapper {
                             $newLoan['Borrowed Title'] = $borrowedTitle
                             $newLoan['Item Barcode'] = $barcode
                         }
-                        { $_ -eq $borrowedDateKey -or $_ -eq 'Borrowed_1' } {  # Added -or $_ -eq 'Borrowed_1'
-                            # Make sure to convert the date format
-                            $dateValue = Convert-DateToNumericFormat $rowData[$k]
-                            $newLoan['Borrowed Date'] = $dateValue  # Always use 'Borrowed Date' as the column name
+                        { $_ -eq $borrowedDateKey } {
+                            $newLoan['Borrowed Date'] = $borrowedDate
                         }
                         { $_ -eq $borrowedByKey } {
                             $newLoan['Borrowed By'] = $borrowedByFormatted
