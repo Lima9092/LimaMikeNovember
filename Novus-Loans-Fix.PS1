@@ -45,47 +45,38 @@ function Show-LoanUserMapper {
         try {
             $lblStatus.Text = 'Status: Processing...'
             $form.Refresh()
-            
-            if (-not (Test-Path $txtLoans.Text)) {
-                throw "Loans file not found: $($txtLoans.Text)"
-            }
-            if (-not (Test-Path $txtUsers.Text)) {
-                throw "Users file not found: $($txtUsers.Text)"
-            }
-            
-            # Import user data
-            $users = Import-Csv -Path $txtUsers.Text
 
-            # Build strict and fallback user lookup dictionaries
+            if (-not (Test-Path $txtLoans.Text)) { throw "Loans file not found: $($txtLoans.Text)" }
+            if (-not (Test-Path $txtUsers.Text)) { throw "Users file not found: $($txtUsers.Text)" }
+
+            $users = Import-Csv -Path $txtUsers.Text
             $userLookup = @{}
-            $rawNameToCard = @{}
+            $rawNameToUsername = @{}
 
             foreach ($u in $users) {
-                $fullName = $u.'Full Name'.Trim()
-                $cardNumber = $u.'Card Number'
+                $fullName = if ($u.Fullname) { $u.Fullname.Trim() } else { '' }
+                $username = $u.Username
 
-                # Raw fallback match
-                $rawNameToCard[$fullName.ToLower()] = $cardNumber
+                if ($fullName -and $username) {
+                    $rawNameToUsername[$fullName.ToLower()] = $username
+                }
 
-                # Strict match reformat if comma present
                 if ($fullName -match '^([^,]+),\s*(.+)$') {
                     $surname = $matches[1].Trim()
                     $firstname = ($matches[2] -split '\s+')[0]
                     $formatted = "$firstname $surname"
-                    $userLookup[$formatted.ToLower()] = $cardNumber
+
+                    if ($formatted -and $username) {
+                        $userLookup[$formatted.ToLower()] = $username
+                    }
                 }
             }
 
-            # Handle duplicate headers in loan CSV
             $csvLines = Get-Content -Path $txtLoans.Text
-            if ($csvLines.Count -le 1) {
-                throw "Loans CSV file appears to be empty or contains only headers"
-            }
+            if ($csvLines.Count -le 1) { throw "Loans CSV file appears to be empty or contains only headers" }
 
             $headers = $csvLines[0].Split(',') | ForEach-Object { $_.Trim('"') }
-
-            $fixedHeaders = @()
-            $headerCount = @{}
+            $fixedHeaders = @(); $headerCount = @{}
 
             foreach ($header in $headers) {
                 if (-not $headerCount.ContainsKey($header)) {
@@ -103,8 +94,7 @@ function Show-LoanUserMapper {
                 $line = $csvLines[$i]
                 if ([string]::IsNullOrWhiteSpace($line)) { continue }
 
-                $values = $line -split ',(?=(?:[^"]*"[^"]*")*[^"]*$)' | ForEach-Object { $_.Trim('"') }
-
+                $values = $line -split ',(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)' | ForEach-Object { $_.Trim('"') }
                 $rowData = @{}
                 for ($j = 0; $j -lt $fixedHeaders.Count -and $j -lt $values.Count; $j++) {
                     $rowData[$fixedHeaders[$j]] = $values[$j]
@@ -113,18 +103,17 @@ function Show-LoanUserMapper {
                 $borrowed = $rowData['borrowed']
                 if ($null -eq $borrowed) {
                     $borrowedKey = $rowData.Keys | Where-Object { $_ -like 'Borrowed*' } | Select-Object -First 1
-                    $borrowed = if ($borrowedKey) { $rowData[$borrowedKey] } else { "" }
+                    $borrowed = if ($borrowedKey) { $rowData[$borrowedKey] } else { '' }
                 }
 
-                $barcode = ''
-                $borrowedTitle = $borrowed
+                $barcode = ''; $borrowedTitle = $borrowed
                 if ($borrowed -match '^(.*?)\s*\((\d+)\)') {
                     $borrowedTitle = $matches[1].Trim()
                     $barcode = $matches[2]
                 }
 
                 $borrowedByKey = $rowData.Keys | Where-Object { $_ -like 'Borrowed By*' } | Select-Object -First 1
-                $originalBorrower = if ($borrowedByKey) { $rowData[$borrowedByKey] } else { "" }
+                $originalBorrower = if ($borrowedByKey) { $rowData[$borrowedByKey] } else { '' }
 
                 $borrowedByFormatted = $originalBorrower
                 $userBarcode = ''
@@ -137,8 +126,8 @@ function Show-LoanUserMapper {
 
                     if ($userLookup.ContainsKey($lookupKey.ToLower())) {
                         $userBarcode = $userLookup[$lookupKey.ToLower()]
-                    } elseif ($rawNameToCard.ContainsKey($originalBorrower.ToLower())) {
-                        $userBarcode = $rawNameToCard[$originalBorrower.ToLower()]
+                    } elseif ($rawNameToUsername.ContainsKey($originalBorrower.ToLower())) {
+                        $userBarcode = $rawNameToUsername[$originalBorrower.ToLower()]
                     }
                 }
 
@@ -152,15 +141,15 @@ function Show-LoanUserMapper {
                 $newLoan = [PSCustomObject]@{
                     'Borrowed (Raw)'  = $borrowed
                     'Borrowed Title'  = $borrowedTitle
-                    'Item Barcode'         = $barcode
+                    'Item Barcode'    = $barcode
                     'Borrowed By'     = $borrowedByFormatted
-                    'User Barcode'    = $userBarcode
-                    'Borrowed.1 Date' = if ($borrowedDateKey) { $rowData[$borrowedDateKey] } else { "" }
-                    'Return Due'      = if ($returnDueKey) { $rowData[$returnDueKey] } else { "" }
-                    'Shelfmark'       = if ($shelfmarkKey) { $rowData[$shelfmarkKey] } else { "" }
-                    'Repeat Renewals' = if ($renewalsKey) { $rowData[$renewalsKey] } else { "" }
-                    'Department'      = if ($deptKey) { $rowData[$deptKey] } else { "" }
-                    'Reservations'    = if ($resKey) { $rowData[$resKey] } else { "" }
+                    'Username'        = $userBarcode
+                    'Borrowed.1 Date' = if ($borrowedDateKey) { $rowData[$borrowedDateKey] } else { '' }
+                    'Return Due'      = if ($returnDueKey) { $rowData[$returnDueKey] } else { '' }
+                    'Shelfmark'       = if ($shelfmarkKey) { $rowData[$shelfmarkKey] } else { '' }
+                    'Repeat Renewals' = if ($renewalsKey) { $rowData[$renewalsKey] } else { '' }
+                    'Department'      = if ($deptKey) { $rowData[$deptKey] } else { '' }
+                    'Reservations'    = if ($resKey) { $rowData[$resKey] } else { '' }
                 }
 
                 $cleanedLoans += $newLoan
