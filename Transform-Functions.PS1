@@ -5,6 +5,36 @@ if (-not $global:TransformFunctions) {
 
 # Functions
 
+function Date-DDMMMYYYYToDDMMYYYY {
+    param($value)
+    if (-not $value) { return '' }
+    
+    # Define month mapping
+    $monthMap = @{
+        'JAN' = '01'; 'FEB' = '02'; 'MAR' = '03'; 'APR' = '04'
+        'MAY' = '05'; 'JUN' = '06'; 'JUL' = '07'; 'AUG' = '08'
+        'SEP' = '09'; 'OCT' = '10'; 'NOV' = '11'; 'DEC' = '12'
+    }
+    
+    # Trim and process input
+    $dateString = $value.Trim()
+    
+    # Try to parse the date format DD MMM YYYY
+    if ($dateString -match '(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})') {
+        $day = $matches[1].PadLeft(2, '0')
+        $month = $monthMap[$matches[2].ToUpper()]
+        $year = $matches[3]
+        
+        # Return DD/MM/YYYY format
+        return "$day/$month/$year"
+    }
+    else {
+        # Return original value if format doesn't match
+        return $dateString
+    }
+}
+$global:TransformFunctions['Date-DDMMMYYYYToDDMMYYYY'] = ${function:Date-DDMMMYYYYToDDMMYYYY}
+
 function FName-FirstTransform {
     param($value)
     if (-not $value) { return '' }
@@ -66,13 +96,39 @@ function SName-FirstTransform {
 $global:TransformFunctions['SName-FirstTransform'] = ${function:SName-FirstTransform}
 
 function AdultFictionTransform($value) {
-    # If the incoming value starts with 489 or 499, return “Adult-fiction”
-    if ($value -match '^(489|499)') {
-        return 'Adult-fiction'
+    # Check for ISBN-10 pattern and validate
+    # Remove any hyphens or spaces for processing
+    $cleanValue = $value -replace '[-\s]', ''
+    
+    # ISBN-10 regex: exactly 10 characters, digits 0-9 and possibly X as last character
+    if ($cleanValue -match '^(\d{9}[\dX])$') {
+        $isbn10 = $cleanValue.ToUpper()
+        
+        # Validate ISBN-10 using check digit algorithm inline
+        $sum = 0
+        for ($i = 0; $i -lt 9; $i++) {
+            $digit = [int]$isbn10.Substring($i, 1)
+            $sum += $digit * ($i + 1)
+        }
+        
+        $remainder = $sum % 11
+        $checkDigit = $isbn10.Substring(9, 1)
+        
+        # Check digit is X if remainder is 10, otherwise it is the remainder itself
+        $isValid = if ($remainder -eq 10) {
+            $checkDigit -eq 'X'
+        } else {
+            $checkDigit -eq $remainder.ToString()
+        }
+        
+        if ($isValid) {
+            return 'AF'
+        }
     }
-    # otherwise return a blank string
+    
+    # If not a valid ISBN-10 return blank
     return ''
 }
 
-# Register it in your in‐memory lookup
+# Register it in your in-memory lookup
 $global:TransformFunctions['AdultFictionTransform'] = ${function:AdultFictionTransform}
