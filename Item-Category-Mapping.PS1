@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-Batch processor for large book catalogs with rate limiting and resume capability
+Batch processor for large book catalogs with rate limiting, resume capability, and continuous processing
 
 .DESCRIPTION
 Processes large catalogs in batches of 100 items every 5+ minutes to respect API limits.
-Includes resume capability, progress tracking, and ISBN-10 validation.
+Includes resume capability, progress tracking, ISBN-10 validation, and continuous processing until all ISBNs are enriched.
 #>
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -59,20 +59,17 @@ function Get-ValidISBN10 {
     return $null
 }
 
-# LMS Category mapping function - maps Open Library subjects to your specific LMS categories
+# LMS Category mapping function
 function Get-LMSCategory {
     param([array]$subjects, [string]$format = 'Books')
     
-    if (-not $subjects) { return 'ANF' }  # Default to Adult Non-Fiction instead of 'Books'
+    if (-not $subjects) { return 'AF' }
     
-    # Convert subjects to lowercase for matching
     $subjectNames = $subjects | ForEach-Object { $_.name.ToLower() }
     $allSubjects = $subjectNames -join ' '
     
-    # Age group determination - be more intelligent about classification
-    $ageGroup = 'Adult'  # Default
+    $ageGroup = 'Adult'
     
-    # Check for EXPLICIT child indicators (must be very specific to avoid false positives)
     $explicitChildKeywords = @(
         'picture book', 'board book', 'early reader', 'kindergarten', 'preschool', 'toddler',
         'ages 0', 'ages 1', 'ages 2', 'ages 3', 'ages 4', 'ages 5', 'ages 6', 'ages 7', 'ages 8',
@@ -87,7 +84,6 @@ function Get-LMSCategory {
         }
     }
     
-    # Check for classic literature indicators (these should NOT override teen/child for modern books)
     $classicLiteratureKeywords = @(
         'fiction classics', 'penguin classics', 'oxford classics', 'bantam classics', 'classical literature',
         'english literature, history and criticism', 'russian literature', 'french literature', 
@@ -102,8 +98,6 @@ function Get-LMSCategory {
         }
     }
     
-    # Don't treat modern books as classic literature even if they have generic "classics" tag
-    # Only treat as classic if published before 1950 OR has very specific classic literature indicators
     if ($isClassicLiterature -and (
         $allSubjects -match '\b(young adult fiction|young adult works|teen fiction|ya fiction|children''?s books|juvenile fiction|children''?s fiction)\b' -or
         $allSubjects -match '\b(harry potter|twilight|hunger games|dr\. seuss|narnia)\b'
@@ -111,7 +105,6 @@ function Get-LMSCategory {
         $isClassicLiterature = $false
     }
     
-    # Check for adult fiction themes that should override child classification
     $adultThemeKeywords = @(
         'marriage', 'courtship', 'man-woman relationships', 'romance fiction', 'love stories',
         'social classes', 'upper class', 'manners and customs', 'psychological fiction',
@@ -126,53 +119,26 @@ function Get-LMSCategory {
         }
     }
     
-    # Check for classic literature indicators (these should NOT be children's books)
-    $classicLiteratureKeywords = @(
-        'classic literature', 'literary fiction', 'english literature', 'american literature',
-        'fiction classics', 'penguin classics', 'oxford classics', 'bantam classics', 'classical literature',
-        'english fiction', 'russian literature', 'french literature', 'continental european fiction',
-        'literature and fiction (general)', 'english literature, history and criticism'
-    )
-    
-    $isClassicLiterature = $false
-    foreach ($keyword in $classicLiteratureKeywords) {
-        if ($allSubjects -match [regex]::Escape($keyword)) {
-            $isClassicLiterature = $true
-            break
-        }
-    }
-    
-    # Don't treat modern YA/teen books as classic literature even if they have "classics" tag
-    if ($isClassicLiterature -and ($allSubjects -match '\b(young adult fiction|young adult works|teen fiction|ya fiction)\b')) {
-        $isClassicLiterature = $false
-    }
-    
-    # Determine age group with better logic
     if ($hasExplicitChild -and -not $isClassicLiterature -and -not $hasAdultThemes) {
         $ageGroup = 'Child'
     }
-    # Check for teen indicators (after child check)
     elseif ($allSubjects -match '\b(young adult|ya fiction|teen fiction|teenage fiction|adolescent|ages 1[2-9]|grade [6-9]|high school|middle school)\b' -and -not $isClassicLiterature -and -not $hasAdultThemes) {
         $ageGroup = 'Teen'
     }
-    # If it has classic literature or adult themes, treat as adult regardless of other tags
     elseif ($isClassicLiterature -or $hasAdultThemes) {
         $ageGroup = 'Adult'
     }
     
-    # Content type determination
     $isReference = $false
     $isFiction = $false
     $isGraphicNovel = $false
     
-    # Reference detection - be much more specific to avoid false positives
     $explicitReferenceKeywords = @(
         'dictionaries', 'encyclopedia', 'handbook', 'manual', 'textbook', 
         'almanac', 'atlas', 'directory', 'reference work', 'reference book',
         'dictionary', 'the oxford english dictionary'
     )
     
-    $isReference = $false
     foreach ($keyword in $explicitReferenceKeywords) {
         if ($allSubjects -match [regex]::Escape($keyword) -and $allSubjects -notmatch '\b(fiction|novel|literature|story)\b') {
             $isReference = $true
@@ -180,16 +146,12 @@ function Get-LMSCategory {
         }
     }
     
-    # Graphic novel detection - be more specific and exclude false positives
-    $isGraphicNovel = $false
     if (($allSubjects -match '\b(graphic novels?|comic books?|manga)\b' -or 
          $allSubjects -match '\b(comics & graphic novels)\b') -and 
         $allSubjects -notmatch '\b(adaptations|comic books, strips, etc\.|illustrations)\b') {
         $isGraphicNovel = $true
     }
     
-    # Fiction detection (only if not reference or graphic novel)
-    # Be more specific about fiction keywords
     if (-not $isReference -and -not $isGraphicNovel) {
         if ($allSubjects -match '\b(fiction|novels?|romance|mystery|thriller|horror|fantasy|science fiction|historical fiction|adventure fiction|drama|short stories|literature|literary fiction)\b' -and
             $allSubjects -notmatch '\b(non-fiction|nonfiction)\b') {
@@ -197,7 +159,6 @@ function Get-LMSCategory {
         }
     }
     
-    # Handle audiobook format
     if ($format -eq 'Audiobook' -or $format -eq 'Spoken Word') {
         if ($isFiction) {
             switch ($ageGroup) {
@@ -206,7 +167,6 @@ function Get-LMSCategory {
                 default { return 'AUD-ADULT' }
             }
         } else {
-            # Non-fiction audiobooks
             switch ($ageGroup) {
                 'Child' { return 'AUDNF-CH' }
                 'Teen'  { return 'AUDNF-T' }
@@ -215,7 +175,6 @@ function Get-LMSCategory {
         }
     }
     
-    # Handle print books
     if ($isReference) {
         switch ($ageGroup) {
             'Child' { return 'CREF' }
@@ -227,18 +186,17 @@ function Get-LMSCategory {
         if ($ageGroup -eq 'Teen') {
             return 'GRAFICT'
         } else {
-            return 'GRAFIC'  # Assumes adult/child graphic novels use same category
+            return 'GRAFIC'
         }
     }
     elseif ($isFiction) {
         switch ($ageGroup) {
             'Child' { return 'CF' }
             'Teen'  { return 'TF' }
-            default { return 'AF' }  # Adult Fiction
+            default { return 'AF' }
         }
     }
     else {
-        # Non-fiction
         switch ($ageGroup) {
             'Child' { return 'CNF' }
             'Teen'  { return 'TNF' }
@@ -247,87 +205,16 @@ function Get-LMSCategory {
     }
 }
 
-# Debug function to show categorization logic
+# Debug function
 function Get-CategoryDebug {
     param([array]$subjects, [string]$format = 'Books')
     
-    if (-not $subjects) { return 'No subjects | Default: ANF' }
+    if (-not $subjects) { return 'No subjects | Default: AF' }
     
     $subjectNames = $subjects | ForEach-Object { $_.name.ToLower() }
     $allSubjects = $subjectNames -join ' '
     
     $debug = "Subjects: [$($subjectNames -join '; ')] | "
-    
-    # Check for explicit child indicators
-    $explicitChildKeywords = @(
-        'picture book', 'board book', 'early reader', 'kindergarten', 'preschool', 'toddler',
-        'ages 0', 'ages 1', 'ages 2', 'ages 3', 'ages 4', 'ages 5', 'ages 6', 'ages 7', 'ages 8',
-        'grade k', 'grade 1', 'grade 2', 'grade 3', 'grade 4', 'grade 5'
-    )
-    
-    $hasExplicitChild = $false
-    foreach ($keyword in $explicitChildKeywords) {
-        if ($allSubjects -match [regex]::Escape($keyword)) {
-            $hasExplicitChild = $true
-            break
-        }
-    }
-    
-    # Check for classic literature
-    $classicLiteratureKeywords = @(
-        'classic', 'literature', 'literary fiction', 'english literature', 'american literature',
-        'fiction classics', 'penguin classics', 'oxford classics', 'bantam classics'
-    )
-    
-    $isClassicLiterature = $false
-    foreach ($keyword in $classicLiteratureKeywords) {
-        if ($allSubjects -match [regex]::Escape($keyword)) {
-            $isClassicLiterature = $true
-            break
-        }
-    }
-    
-    # Age group determination
-    $ageGroup = 'Adult'
-    if ($hasExplicitChild -and -not $isClassicLiterature) {
-        $ageGroup = 'Child'
-        $debug += "Age: Child (explicit child keywords found, not classic lit) | "
-    } elseif ($allSubjects -match '\b(young adult|ya fiction|teen fiction|teenage fiction|adolescent|ages 1[2-9]|grade [6-9]|high school|middle school)\b' -and -not $isClassicLiterature) {
-        $ageGroup = 'Teen'
-        $debug += "Age: Teen (teen keywords found, not classic lit) | "
-    } elseif ($isClassicLiterature) {
-        $debug += "Age: Adult (classic literature override) | "
-    } else {
-        $debug += "Age: Adult (default) | "
-    }
-    
-    $debug += "ExplicitChild: $hasExplicitChild | ClassicLit: $isClassicLiterature | "
-    
-    # Content type
-    $explicitReferenceKeywords = @(
-        'dictionaries', 'encyclopedia', 'handbook', 'manual', 'textbook', 
-        'almanac', 'atlas', 'directory', 'reference work', 'reference book',
-        'dictionary', 'the oxford english dictionary'
-    )
-    
-    $isReference = $false
-    foreach ($keyword in $explicitReferenceKeywords) {
-        if ($allSubjects -match [regex]::Escape($keyword) -and $allSubjects -notmatch '\b(fiction|novel|literature|story)\b') {
-            $isReference = $true
-            break
-        }
-    }
-    
-    $isGraphicNovel = $false
-    if ($allSubjects -match '\b(graphic novels?|comic books?|manga)\b' -and 
-        $allSubjects -notmatch '\b(comics & graphic novels, adaptations|adaptations)\b') {
-        $isGraphicNovel = $true
-    }
-    
-    $isFiction = (-not $isReference -and -not $isGraphicNovel) -and ($allSubjects -match '\b(fiction|novels?|romance|mystery|thriller|horror|fantasy|science fiction|historical fiction|adventure fiction|drama|short stories|literature|literary fiction)\b' -and
-        $allSubjects -notmatch '\b(non-fiction|nonfiction)\b')
-    
-    $debug += "Reference: $isReference | Fiction: $isFiction | Graphic: $isGraphicNovel | "
     $debug += "Format: $format | "
     $debug += "Final: $(Get-LMSCategory -subjects $subjects -format $format)"
     
@@ -336,8 +223,8 @@ function Get-CategoryDebug {
 
 # Create form
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Batch Book Enrichment - Large Catalogs"
-$form.Size = New-Object System.Drawing.Size(700, 700)
+$form.Text = "Continuous Book Enrichment - Large Catalogs"
+$form.Size = New-Object System.Drawing.Size(700, 750)
 $form.StartPosition = 'CenterScreen'
 
 # Input file controls
@@ -379,7 +266,7 @@ $numBatchSize.Location = '400,47'
 $numBatchSize.Width = 80
 $numBatchSize.Minimum = 50
 $numBatchSize.Maximum = 100
-$numBatchSize.Value = 95  # Slightly under limit for safety
+$numBatchSize.Value = 95
 
 # Batch interval
 $lblInterval = New-Object System.Windows.Forms.Label
@@ -392,7 +279,7 @@ $numInterval.Location = '130,82'
 $numInterval.Width = 80
 $numInterval.Minimum = 5
 $numInterval.Maximum = 60
-$numInterval.Value = 6  # 6 minutes for safety margin
+$numInterval.Value = 6
 
 # Resume from record
 $lblResume = New-Object System.Windows.Forms.Label
@@ -407,7 +294,7 @@ $numResume.Minimum = 0
 $numResume.Maximum = 100000
 $numResume.Value = 0
 
-# Format detection (add after lookup field selection)
+# Format detection
 $lblFormat = New-Object System.Windows.Forms.Label
 $lblFormat.Text = 'Material Format:'
 $lblFormat.AutoSize = $true
@@ -420,28 +307,39 @@ $comboFormat.DropDownStyle = 'DropDownList'
 $comboFormat.Items.AddRange(@('Books', 'Audiobook/Spoken Word'))
 $comboFormat.SelectedIndex = 0
 
-# ISBN Validation Summary (new section)
+# Cycle counter display
+$lblCycleCount = New-Object System.Windows.Forms.Label
+$lblCycleCount.Text = 'Processing Cycle: 1'
+$lblCycleCount.AutoSize = $true
+$lblCycleCount.Location = '300,120'
+
+$lblTotalProcessed = New-Object System.Windows.Forms.Label
+$lblTotalProcessed.Text = 'Total API Calls: 0'
+$lblTotalProcessed.AutoSize = $true
+$lblTotalProcessed.Location = '450,120'
+
+# ISBN Validation Summary
 $lblValidation = New-Object System.Windows.Forms.Label
 $lblValidation.Text = 'ISBN Validation Summary:'
 $lblValidation.AutoSize = $true
-$lblValidation.Location = '300,120'
+$lblValidation.Location = '10,155'
 
 $txtValidation = New-Object System.Windows.Forms.TextBox
-$txtValidation.Location = '300,140'
-$txtValidation.Size = New-Object System.Drawing.Size(360,20)
+$txtValidation.Location = '10,175'
+$txtValidation.Size = New-Object System.Drawing.Size(650,20)
 $txtValidation.ReadOnly = $true
 $txtValidation.Text = 'Load a file and select lookup field to see validation summary'
 
-# Attributes checklist (moved down)
+# Attributes checklist
 $lblAttrs = New-Object System.Windows.Forms.Label
 $lblAttrs.Text = 'Attributes:'
 $lblAttrs.AutoSize = $true
-$lblAttrs.Location = '10,175'
+$lblAttrs.Location = '10,210'
 
 $clbAttrs = New-Object System.Windows.Forms.CheckedListBox
-$clbAttrs.Location = '100,172'
+$clbAttrs.Location = '100,207'
 $clbAttrs.Size = New-Object System.Drawing.Size(200,120)
-$attributes = @('subjects','authors','publishers','publish_date','number_of_pages','title','lms_category','category_debug')
+$attributes = @('subjects','authors','publishers','publish_date','number_of_pages','enh_title','lms_category','category_debug')
 foreach ($a in $attributes) { $clbAttrs.Items.Add($a) }
 $clbAttrs.Enabled = $false
 
@@ -449,59 +347,65 @@ $clbAttrs.Enabled = $false
 $lblOutput = New-Object System.Windows.Forms.Label
 $lblOutput.Text = 'Output CSV:'
 $lblOutput.AutoSize = $true
-$lblOutput.Location = '10,310'
+$lblOutput.Location = '10,345'
 
 $txtOutput = New-Object System.Windows.Forms.TextBox
-$txtOutput.Location = '100,307'
+$txtOutput.Location = '100,342'
 $txtOutput.Width = 400
 $txtOutput.ReadOnly = $true
 
 $btnBrowseOutput = New-Object System.Windows.Forms.Button
 $btnBrowseOutput.Text = 'Save As...'
-$btnBrowseOutput.Location = '510,305'
+$btnBrowseOutput.Location = '510,340'
 $btnBrowseOutput.Width = 75
 $btnBrowseOutput.Enabled = $false
 
 # Processing controls
 $btnStart = New-Object System.Windows.Forms.Button
-$btnStart.Text = 'Start Batch Processing'
-$btnStart.Location = '200,345'
-$btnStart.Width = 150
+$btnStart.Text = 'Start Continuous Processing'
+$btnStart.Location = '150,380'
+$btnStart.Width = 180
 $btnStart.Enabled = $false
 
 $btnStop = New-Object System.Windows.Forms.Button
 $btnStop.Text = 'Stop'
-$btnStop.Location = '360,345'
+$btnStop.Location = '340,380'
 $btnStop.Width = 80
 $btnStop.Enabled = $false
+
+$btnPause = New-Object System.Windows.Forms.Button
+$btnPause.Text = 'Pause'
+$btnPause.Location = '430,380'
+$btnPause.Width = 80
+$btnPause.Enabled = $false
 
 # Status labels
 $lblStatus = New-Object System.Windows.Forms.Label
 $lblStatus.Text = 'Status: Ready'
 $lblStatus.AutoSize = $true
-$lblStatus.Location = '10,385'
+$lblStatus.Location = '10,420'
 
 $lblProgress = New-Object System.Windows.Forms.Label
 $lblProgress.Text = 'Progress: 0 / 0'
 $lblProgress.AutoSize = $true
-$lblProgress.Location = '200,385'
+$lblProgress.Location = '200,420'
 
 $lblETA = New-Object System.Windows.Forms.Label
 $lblETA.Text = 'ETA: --'
 $lblETA.AutoSize = $true
-$lblETA.Location = '400,385'
+$lblETA.Location = '400,420'
 
 # Progress bar
 $progressBar = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Location = '10,415'
+$progressBar.Location = '10,450'
 $progressBar.Size = New-Object System.Drawing.Size(650,20)
 
 # Log box
 $txtLog = New-Object System.Windows.Forms.TextBox
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = 'Vertical'
-$txtLog.Location = '10,445'
-$txtLog.Size = New-Object System.Drawing.Size(650,215)
+$txtLog.Location = '10,480'
+$txtLog.Size = New-Object System.Drawing.Size(650,220)
 $txtLog.ReadOnly = $true
 
 # Add controls to form
@@ -509,11 +413,11 @@ $controls = @(
     $lblInput, $txtInput, $btnBrowseInput,
     $lblField, $comboField, $lblBatchSize, $numBatchSize,
     $lblInterval, $numInterval, $lblResume, $numResume,
-    $lblFormat, $comboFormat,
+    $lblFormat, $comboFormat, $lblCycleCount, $lblTotalProcessed,
     $lblValidation, $txtValidation,
     $lblAttrs, $clbAttrs,
     $lblOutput, $txtOutput, $btnBrowseOutput,
-    $btnStart, $btnStop,
+    $btnStart, $btnStop, $btnPause,
     $lblStatus, $lblProgress, $lblETA,
     $progressBar, $txtLog
 )
@@ -523,7 +427,12 @@ foreach ($c in $controls) { $form.Controls.Add($c) }
 $global:Books = $null
 $global:ValidISBNs = $null
 $global:ProcessingActive = $false
+$global:ProcessingPaused = $false
 $global:StartTime = $null
+$global:ProcessingSettings = $null
+$global:CycleCount = 1
+$global:TotalAPICalls = 0
+$global:ProcessedISBNs = @{}
 
 # Function to validate ISBNs in the dataset
 function Update-ISBNValidation {
@@ -558,7 +467,6 @@ function Update-ISBNValidation {
     $totalRecords = $global:Books.Count
     $txtValidation.Text = "Total: $totalRecords | Valid ISBNs: $validCount | Invalid: $invalidCount | Empty: $emptyCount"
     
-    # Update time estimate based on valid ISBNs
     if ($validCount -gt 0) {
         $totalBatches = [Math]::Ceiling($validCount / $numBatchSize.Value)
         $estimatedHours = [Math]::Round(($totalBatches * $numInterval.Value) / 60, 1)
@@ -567,54 +475,12 @@ function Update-ISBNValidation {
         $txtLog.AppendText("- Valid ISBN-10 codes: $validCount`r`n")
         $txtLog.AppendText("- Invalid/malformed: $invalidCount`r`n")
         $txtLog.AppendText("- Empty fields: $emptyCount`r`n")
-        $txtLog.AppendText("Estimated processing time: $estimatedHours hours ($totalBatches batches) for valid ISBNs only`r`n")
+        $txtLog.AppendText("Estimated processing time per cycle: $estimatedHours hours ($totalBatches batches)`r`n")
     }
 }
 
-# Browse Input event
-$btnBrowseInput.Add_Click({
-    $ofd = New-Object System.Windows.Forms.OpenFileDialog
-    $ofd.Filter = 'CSV Files (*.csv)|*.csv'
-    if ($ofd.ShowDialog() -eq 'OK') {
-        $txtInput.Text = $ofd.FileName
-        try {
-            $global:Books = Import-Csv -Path $ofd.FileName
-            if ($global:Books.Count -gt 0) {
-                $comboField.Items.Clear()
-                $global:Books[0].PSObject.Properties.Name | ForEach-Object { $comboField.Items.Add($_) }
-                $comboField.Enabled = $true
-                $clbAttrs.Enabled = $true
-                $btnBrowseOutput.Enabled = $true
-                $numResume.Maximum = $global:Books.Count
-                
-                $txtLog.AppendText("Loaded $($global:Books.Count) records.`r`n")
-                $txtLog.AppendText("Select lookup field to validate ISBNs and see time estimate.`r`n")
-            }
-        } catch {
-            [System.Windows.Forms.MessageBox]::Show("Failed to load CSV: $_")
-        }
-    }
-})
-
-# Field selection event (new)
-$comboField.Add_SelectedIndexChanged({
-    if ($comboField.SelectedItem -and $global:Books) {
-        Update-ISBNValidation -fieldName $comboField.SelectedItem
-    }
-})
-
-# Browse Output event
-$btnBrowseOutput.Add_Click({
-    $sfd = New-Object System.Windows.Forms.SaveFileDialog
-    $sfd.Filter = 'CSV Files (*.csv)|*.csv'
-    if ($sfd.ShowDialog() -eq 'OK') { 
-        $txtOutput.Text = $sfd.FileName
-        $btnStart.Enabled = $true
-    }
-})
-
-# Start Processing event
-$btnStart.Add_Click({
+# Function to start processing
+function Start-ProcessingJob {
     if (-not $comboField.SelectedItem -or -not $txtOutput.Text) { return }
     
     $selected = $clbAttrs.CheckedItems | ForEach-Object { $_ }
@@ -623,7 +489,6 @@ $btnStart.Add_Click({
         return 
     }
 
-    # Validate ISBNs if not already done
     if (-not $global:ValidISBNs) {
         Update-ISBNValidation -fieldName $comboField.SelectedItem
     }
@@ -633,65 +498,106 @@ $btnStart.Add_Click({
         return
     }
 
+    $global:ProcessingSettings = @{
+        KeyField = $comboField.SelectedItem
+        SelectedFormat = if ($comboFormat.SelectedItem -eq 'Audiobook/Spoken Word') { 'Audiobook' } else { 'Books' }
+        BatchSize = $numBatchSize.Value
+        IntervalMinutes = $numInterval.Value
+        StartFrom = $numResume.Value
+        SelectedAttributes = $selected
+        OutputPath = $txtOutput.Text
+    }
+
     $global:ProcessingActive = $true
-    $global:StartTime = Get-Date
+    $global:ProcessingPaused = $false
+    if ($global:CycleCount -eq 1) {
+        $global:StartTime = Get-Date
+    }
     $btnStart.Enabled = $false
     $btnStop.Enabled = $true
-    
-    $keyField = $comboField.SelectedItem
-    $selectedFormat = if ($comboFormat.SelectedItem -eq 'Audiobook/Spoken Word') { 'Audiobook' } else { 'Books' }
-    $batchSize = $numBatchSize.Value
-    $intervalMinutes = $numInterval.Value
-    $startFrom = $numResume.Value
+    $btnPause.Enabled = $true
     
     $totalRecords = $global:Books.Count
     $progressBar.Maximum = $totalRecords
-    $progressBar.Value = $startFrom
+    $progressBar.Value = $global:ProcessingSettings.StartFrom
     
-    $txtLog.Clear()
-    $txtLog.AppendText("Starting batch processing...`r`n")
-    $txtLog.AppendText("Batch size: $batchSize, Interval: $intervalMinutes minutes`r`n")
-    $txtLog.AppendText("Starting from record: $($startFrom + 1)`r`n")
+    $lblCycleCount.Text = "Processing Cycle: $global:CycleCount"
+    $lblTotalProcessed.Text = "Total API Calls: $global:TotalAPICalls"
+    
+    if ($global:CycleCount -eq 1) {
+        $txtLog.Clear()
+        $txtLog.AppendText("Starting continuous processing until all ISBNs are enriched...`r`n")
+    } else {
+        $txtLog.AppendText("`r`n=== CYCLE $global:CycleCount STARTED ===`r`n")
+    }
+    
+    $txtLog.AppendText("Batch size: $($global:ProcessingSettings.BatchSize), Interval: $($global:ProcessingSettings.IntervalMinutes) minutes`r`n")
+    $txtLog.AppendText("Starting from record: $($global:ProcessingSettings.StartFrom + 1)`r`n")
     $txtLog.AppendText("Valid ISBNs to process: $($global:ValidISBNs.Count)`r`n")
+    $txtLog.AppendText("Already processed ISBNs: $($global:ProcessedISBNs.Count)`r`n")
     
     $apiCallCount = 0
     $validISBNsProcessed = 0
+    $newEnrichmentsThisCycle = 0
     
     # Process in batches
-    for ($i = $startFrom; $i -lt $totalRecords -and $global:ProcessingActive; $i += $batchSize) {
-        $batchEnd = [Math]::Min($i + $batchSize - 1, $totalRecords - 1)
-        $batchNumber = [Math]::Floor($i / $batchSize) + 1
-        $totalBatches = [Math]::Ceiling($totalRecords / $batchSize)
+    for ($i = $global:ProcessingSettings.StartFrom; $i -lt $totalRecords -and $global:ProcessingActive; $i += $global:ProcessingSettings.BatchSize) {
+        # Check for pause
+        while ($global:ProcessingPaused -and $global:ProcessingActive) {
+            $lblStatus.Text = "Processing paused - click Start to resume"
+            Start-Sleep -Seconds 1
+            [System.Windows.Forms.Application]::DoEvents()
+        }
         
-        $lblStatus.Text = "Processing batch $batchNumber of $totalBatches"
+        if (-not $global:ProcessingActive) { break }
+        
+        $batchEnd = [Math]::Min($i + $global:ProcessingSettings.BatchSize - 1, $totalRecords - 1)
+        $batchNumber = [Math]::Floor($i / $global:ProcessingSettings.BatchSize) + 1
+        $totalBatches = [Math]::Ceiling($totalRecords / $global:ProcessingSettings.BatchSize)
+        
+        $lblStatus.Text = "Cycle $global:CycleCount - Processing batch $batchNumber of $totalBatches"
         $txtLog.AppendText("`r`nProcessing batch $batchNumber ($($i + 1) to $($batchEnd + 1))...`r`n")
         
         $batchAPICallCount = 0
         
         # Process current batch
         for ($j = $i; $j -le $batchEnd -and $global:ProcessingActive; $j++) {
+            # Check for pause during batch processing
+            while ($global:ProcessingPaused -and $global:ProcessingActive) {
+                $lblStatus.Text = "Processing paused - click Start to resume"
+                Start-Sleep -Seconds 1
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+            
+            if (-not $global:ProcessingActive) { break }
+            
             $book = $global:Books[$j]
-            $idRaw = $book.$keyField
+            $idRaw = $book.($global:ProcessingSettings.KeyField)
             $validISBN = Get-ValidISBN10 -rawISBN $idRaw
             
-            if ($validISBN) {
+            if ($validISBN -and -not $global:ProcessedISBNs.ContainsKey($validISBN)) {
                 $url = "https://openlibrary.org/api/books?bibkeys=ISBN:$validISBN&jscmd=data&format=json"
                 try {
                     $resp = Invoke-RestMethod -Uri $url -ErrorAction Stop
                     $entry = $resp."ISBN:$validISBN"
                     $apiCallCount++
+                    $global:TotalAPICalls++
                     $batchAPICallCount++
                     $validISBNsProcessed++
                     
                     if ($entry) {
-                        foreach ($attr in $selected) {
+                        $newEnrichmentsThisCycle++
+                        $global:ProcessedISBNs[$validISBN] = $true
+                        
+                        foreach ($attr in $global:ProcessingSettings.SelectedAttributes) {
                             $val = ''
                             switch ($attr) {
                                 'subjects'   { if ($entry.subjects) { $val = ($entry.subjects | ForEach-Object { $_.name }) -join '; ' } }
-                                'lms_category' { $val = Get-LMSCategory -subjects $entry.subjects -format $selectedFormat }
-                                'category_debug' { $val = Get-CategoryDebug -subjects $entry.subjects -format $selectedFormat }
+                                'lms_category' { $val = Get-LMSCategory -subjects $entry.subjects -format $global:ProcessingSettings.SelectedFormat }
+                                'category_debug' { $val = Get-CategoryDebug -subjects $entry.subjects -format $global:ProcessingSettings.SelectedFormat }
                                 'authors'    { if ($entry.authors) { $val = ($entry.authors | ForEach-Object { $_.name }) -join '; ' } }
                                 'publishers' { if ($entry.publishers) { $val = ($entry.publishers | ForEach-Object { $_.name }) -join '; ' } }
+                                'enh_title'  { if ($entry.title) { $val = $entry.title } }
                                 default      {
                                     if ($entry.PSObject.Properties.Name -contains $attr) {
                                         $x = $entry.$attr
@@ -706,31 +612,25 @@ $btnStart.Add_Click({
                     # Silently continue on errors to avoid spam
                 }
                 
-                Start-Sleep -Milliseconds 100  # Small delay between individual requests
+                Start-Sleep -Milliseconds 100
             }
             
             $progressBar.Value = $j + 1
-            $lblProgress.Text = "Progress: $($j + 1) / $totalRecords (API calls: $apiCallCount)"
+            $lblProgress.Text = "Progress: $($j + 1) / $totalRecords (API calls: $global:TotalAPICalls)"
+            $lblTotalProcessed.Text = "Total API Calls: $global:TotalAPICalls"
             
-            # Calculate ETA based on valid ISBNs processed AND batch intervals
+            # Calculate ETA based on remaining unprocessed ISBNs
             if ($validISBNsProcessed -gt 0) {
                 $elapsed = (Get-Date) - $global:StartTime
-                $remainingValidISBNs = $global:ValidISBNs.Count - $validISBNsProcessed
+                $remainingISBNs = $global:ValidISBNs.Count - $global:ProcessedISBNs.Count
                 
-                # Calculate remaining batches
-                $currentBatch = [Math]::Floor(($j - $startFrom) / $batchSize) + 1
-                $totalBatches = [Math]::Ceiling($global:ValidISBNs.Count / $batchSize)
-                $remainingBatches = $totalBatches - $currentBatch
-                
-                # Estimate processing time for remaining ISBNs
-                $avgTimePerValidISBN = $elapsed.TotalMinutes / $validISBNsProcessed
-                $remainingProcessingTime = $remainingValidISBNs * $avgTimePerValidISBN
-                
-                # Add time for remaining batch intervals (6 minutes each, but not after the last batch)
-                $remainingIntervalTime = $remainingBatches * $intervalMinutes
-                
-                $totalRemainingTime = $remainingProcessingTime + $remainingIntervalTime
-                $lblETA.Text = "ETA: $([Math]::Round($totalRemainingTime, 0)) minutes"
+                if ($remainingISBNs -gt 0) {
+                    $avgTimePerValidISBN = $elapsed.TotalMinutes / $global:ProcessedISBNs.Count
+                    $estimatedRemainingTime = $remainingISBNs * $avgTimePerValidISBN
+                    $lblETA.Text = "ETA: $([Math]::Round($estimatedRemainingTime, 0)) minutes ($remainingISBNs ISBNs remaining)"
+                } else {
+                    $lblETA.Text = "ETA: Complete! All ISBNs processed"
+                }
             }
             
             [System.Windows.Forms.Application]::DoEvents()
@@ -738,19 +638,32 @@ $btnStart.Add_Click({
         
         # Save progress after each batch
         try {
-            $global:Books | Export-Csv -Path $txtOutput.Text -NoTypeInformation -Encoding UTF8
+            $global:Books | Export-Csv -Path $global:ProcessingSettings.OutputPath -NoTypeInformation -Encoding UTF8
             $txtLog.AppendText("Batch $batchNumber completed. API calls in batch: $batchAPICallCount. Progress saved.`r`n")
         } catch {
             $txtLog.AppendText("Failed to save progress: $_`r`n")
         }
         
+        # Update resume point for potential restart
+        $global:ProcessingSettings.StartFrom = $i + $global:ProcessingSettings.BatchSize
+        $numResume.Value = $global:ProcessingSettings.StartFrom
+        
         # Wait between batches (except for last batch)
         if ($batchEnd -lt $totalRecords - 1 -and $global:ProcessingActive) {
-            $lblStatus.Text = "Waiting $intervalMinutes minutes before next batch..."
-            $txtLog.AppendText("Waiting $intervalMinutes minutes before next batch...`r`n")
+            $lblStatus.Text = "Waiting $($global:ProcessingSettings.IntervalMinutes) minutes before next batch..."
+            $txtLog.AppendText("Waiting $($global:ProcessingSettings.IntervalMinutes) minutes before next batch...`r`n")
             
-            $waitSeconds = $intervalMinutes * 60
+            $waitSeconds = $global:ProcessingSettings.IntervalMinutes * 60
             for ($wait = 0; $wait -lt $waitSeconds -and $global:ProcessingActive; $wait++) {
+                # Check for pause during wait
+                while ($global:ProcessingPaused -and $global:ProcessingActive) {
+                    $lblStatus.Text = "Processing paused during wait - click Start to resume"
+                    Start-Sleep -Seconds 1
+                    [System.Windows.Forms.Application]::DoEvents()
+                }
+                
+                if (-not $global:ProcessingActive) { break }
+                
                 # Calculate remaining time
                 $remainingSeconds = $waitSeconds - $wait
                 $remainingMinutes = [Math]::Floor($remainingSeconds / 60)
@@ -771,30 +684,155 @@ $btnStart.Add_Click({
                 $lblStatus.Text = "Wait complete. Starting next batch..."
                 $txtLog.AppendText("Wait complete. Starting next batch...`r`n")
                 [System.Windows.Forms.Application]::DoEvents()
-                Start-Sleep -Milliseconds 500  # Brief pause to show the message
+                Start-Sleep -Milliseconds 500
             }
         }
     }
     
+    # Processing completed or stopped
     if ($global:ProcessingActive) {
-        $lblStatus.Text = "Processing completed!"
-        $txtLog.AppendText("`r`nAll batches completed successfully!`r`n")
-        $txtLog.AppendText("Total API calls made: $apiCallCount`r`n")
-        [System.Windows.Forms.MessageBox]::Show("Enrichment completed! File saved to $($txtOutput.Text)`r`nTotal API calls: $apiCallCount")
+        $txtLog.AppendText("`r`nCycle $global:CycleCount completed! New enrichments this cycle: $newEnrichmentsThisCycle`r`n")
+        $txtLog.AppendText("Total API calls in this cycle: $apiCallCount`r`n")
+        $txtLog.AppendText("Total ISBNs processed so far: $($global:ProcessedISBNs.Count) / $($global:ValidISBNs.Count)`r`n")
+        
+        # Check if all ISBNs have been processed OR if we've gone through all records
+        $allRecordsProcessed = ($progressBar.Value -ge $totalRecords)
+        $allISBNsProcessed = ($global:ProcessedISBNs.Count -ge $global:ValidISBNs.Count)
+        
+        if ($allISBNsProcessed -or $allRecordsProcessed) {
+            $lblStatus.Text = "PROCESSING COMPLETE! All records have been processed."
+            $txtLog.AppendText("`r`n=== PROCESSING COMPLETE ===`r`n")
+            $txtLog.AppendText("All records in the file have been processed.`r`n")
+            $txtLog.AppendText("Total API calls made: $global:TotalAPICalls`r`n")
+            $txtLog.AppendText("Total processing cycles: $global:CycleCount`r`n")
+            $txtLog.AppendText("ISBNs successfully enriched: $($global:ProcessedISBNs.Count)`r`n")
+            
+            [System.Windows.Forms.MessageBox]::Show("Processing Complete!`r`n`r`nAll records have been processed.`r`nTotal API calls: $global:TotalAPICalls`r`nTotal cycles: $global:CycleCount`r`nISBNs enriched: $($global:ProcessedISBNs.Count)`r`nFile saved to: $($global:ProcessingSettings.OutputPath)")
+            
+            # Reset for potential new run
+            $global:ProcessedISBNs = @{}
+            $global:CycleCount = 1
+            $global:TotalAPICalls = 0
+        } elseif ($newEnrichmentsThisCycle -eq 0) {
+            # If no new enrichments were found this cycle, stop to avoid endless cycling
+            $lblStatus.Text = "NO NEW ENRICHMENTS FOUND - Processing stopped."
+            $txtLog.AppendText("`r`n=== NO NEW ENRICHMENTS FOUND ===`r`n")
+            $txtLog.AppendText("No new data was found in this cycle. Stopping to avoid endless cycling.`r`n")
+            $txtLog.AppendText("You may want to try again later as the OpenLibrary database is updated frequently.`r`n")
+            
+            [System.Windows.Forms.MessageBox]::Show("No new enrichments found in this cycle.`r`n`r`nProcessing stopped to avoid endless cycling.`r`nTotal API calls: $global:TotalAPICalls`r`nISBNs enriched: $($global:ProcessedISBNs.Count)")
+        } else {
+            # Continue cycling only if we haven't processed all records AND we found new enrichments
+            $lblStatus.Text = "Cycle complete. Starting next cycle immediately..."
+            $txtLog.AppendText("Auto-starting next cycle immediately...`r`n")
+            
+            # Reset resume point for next cycle
+            $global:ProcessingSettings.StartFrom = 0
+            $numResume.Value = 0
+            $global:CycleCount++
+            
+            # Brief pause to show completion message, then restart
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 1000
+            
+            if ($global:ProcessingActive) {
+                Start-ProcessingJob  # Recursive call to restart immediately
+                return
+            }
+        }
     } else {
         $lblStatus.Text = "Processing stopped by user"
         $txtLog.AppendText("`r`nProcessing stopped. You can resume from record $($progressBar.Value).`r`n")
     }
     
+    # Reset UI state
     $global:ProcessingActive = $false
+    $global:ProcessingPaused = $false
     $btnStart.Enabled = $true
     $btnStop.Enabled = $false
+    $btnPause.Enabled = $false
+}
+
+# Browse Input event
+$btnBrowseInput.Add_Click({
+    $ofd = New-Object System.Windows.Forms.OpenFileDialog
+    $ofd.Filter = 'CSV Files (*.csv)|*.csv'
+    if ($ofd.ShowDialog() -eq 'OK') {
+        $txtInput.Text = $ofd.FileName
+        try {
+            $global:Books = Import-Csv -Path $ofd.FileName
+            if ($global:Books.Count -gt 0) {
+                $comboField.Items.Clear()
+                $global:Books[0].PSObject.Properties.Name | ForEach-Object { $comboField.Items.Add($_) }
+                $comboField.Enabled = $true
+                $clbAttrs.Enabled = $true
+                $btnBrowseOutput.Enabled = $true
+                
+                # Properly set the maximum for the resume NumericUpDown
+                $numResume.Maximum = [Math]::Max($global:Books.Count, 100000)
+                $numResume.Value = 0  # Reset to 0 when loading new file
+                
+                $txtLog.AppendText("Loaded $($global:Books.Count) records.`r`n")
+                $txtLog.AppendText("Select lookup field to validate ISBNs and see time estimate.`r`n")
+                
+                # Reset processing state when loading new file
+                $global:ProcessedISBNs = @{}
+                $global:CycleCount = 1
+                $global:TotalAPICalls = 0
+                $lblCycleCount.Text = "Processing Cycle: 1"
+                $lblTotalProcessed.Text = "Total API Calls: 0"
+            }
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Failed to load CSV: $_")
+        }
+    }
+})
+
+# Field selection event
+$comboField.Add_SelectedIndexChanged({
+    if ($comboField.SelectedItem -and $global:Books) {
+        Update-ISBNValidation -fieldName $comboField.SelectedItem
+    }
+})
+
+# Browse Output event
+$btnBrowseOutput.Add_Click({
+    $sfd = New-Object System.Windows.Forms.SaveFileDialog
+    $sfd.Filter = 'CSV Files (*.csv)|*.csv'
+    if ($sfd.ShowDialog() -eq 'OK') { 
+        $txtOutput.Text = $sfd.FileName
+        $btnStart.Enabled = $true
+    }
+})
+
+# Start Processing event
+$btnStart.Add_Click({
+    if ($global:ProcessingPaused) {
+        # Resume from pause
+        $global:ProcessingPaused = $false
+        $btnPause.Enabled = $true
+        $txtLog.AppendText("Processing resumed.`r`n")
+    } else {
+        # Start new processing job
+        Start-ProcessingJob
+    }
 })
 
 # Stop Processing event
 $btnStop.Add_Click({
     $global:ProcessingActive = $false
+    $global:ProcessingPaused = $false
     $lblStatus.Text = "Stopping..."
+})
+
+# Pause Processing event
+$btnPause.Add_Click({
+    if ($global:ProcessingActive) {
+        $global:ProcessingPaused = $true
+        $btnPause.Enabled = $false
+        $txtLog.AppendText("Processing paused. Click Start to resume.`r`n")
+        $lblStatus.Text = "Processing paused"
+    }
 })
 
 # Show the form
