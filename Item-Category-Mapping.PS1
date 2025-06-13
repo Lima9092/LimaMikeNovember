@@ -1,10 +1,12 @@
 <#
 .SYNOPSIS
-Batch processor for large book catalogs with rate limiting, resume capability, and continuous processing
+Batch processor for large book catalogs with local ISBN database, optimized processing, and rate limiting
 
 .DESCRIPTION
-Processes large catalogs in batches of 100 items every 5+ minutes to respect API limits.
+Uses a two-phase approach: Phase 1 processes all local database hits instantly, Phase 2 handles API calls with rate limiting.
 Includes resume capability, progress tracking, ISBN-10 validation, and continuous processing until all ISBNs are enriched.
+Automatically updates the local ISBN database with new API results AND appends data to the original CSV file.
+Includes "Local DB Only" mode for instant processing without API calls.
 #>
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -57,6 +59,136 @@ function Get-ValidISBN10 {
     }
     
     return $null
+}
+
+# Local ISBN Database functions
+function Initialize-LocalISBNDatabase {
+    param([string]$scriptPath)
+    
+    $dbPath = Join-Path $scriptPath "ISBN-Enhanced-DB.csv"
+    
+    if (-not (Test-Path $dbPath)) {
+        # Create new database file with headers
+        $headers = "RCN,subjects,authors,publishers,publish_date,number_of_pages,enh_title,lms_category,category_debug,last_updated"
+        $headers | Out-File -FilePath $dbPath -Encoding UTF8
+        $txtLog.AppendText("Created new ISBN database: $dbPath`r`n")
+        return @{}
+    }
+    
+    try {
+        $dbData = Import-Csv -Path $dbPath -ErrorAction Stop
+        $txtLog.AppendText("Loaded local ISBN database with $($dbData.Count) records from: $dbPath`r`n")
+        
+        # Convert to hashtable for fast lookups
+        $dbHashTable = @{}
+        $loadedCount = 0
+        $skippedCount = 0
+        
+        foreach ($record in $dbData) {
+            if ($record.RCN -and $record.RCN.Trim() -ne '') {
+                $cleanRCN = $record.RCN.Trim()
+                $dbHashTable[$cleanRCN] = $record
+                $loadedCount++
+            } else {
+                $skippedCount++
+            }
+        }
+        
+        $txtLog.AppendText("Database loading summary: $loadedCount records loaded, $skippedCount skipped (empty RCN)`r`n")
+        
+        return $dbHashTable
+    } catch {
+        $txtLog.AppendText("Error loading ISBN database: $_`r`n")
+        return @{}
+    }
+}
+
+function Save-LocalISBNDatabase {
+    param([hashtable]$dbHashTable, [string]$scriptPath)
+    
+    $dbPath = Join-Path $scriptPath "ISBN-Enhanced-DB.csv"
+    
+    try {
+        # Convert hashtable back to array of objects
+        $dbArray = @()
+        foreach ($key in $dbHashTable.Keys) {
+            $dbArray += $dbHashTable[$key]
+        }
+        
+        # Only save if we have data
+        if ($dbArray.Count -gt 0) {
+            # Export to CSV
+            $dbArray | Export-Csv -Path $dbPath -NoTypeInformation -Encoding UTF8
+            $txtLog.AppendText("Successfully saved $($dbArray.Count) records to local database`r`n")
+            return $true
+        } else {
+            $txtLog.AppendText("Warning: No data to save to local database`r`n")
+            return $false
+        }
+    } catch {
+        $txtLog.AppendText("Error saving ISBN database: $_`r`n")
+        return $false
+    }
+}
+
+function Get-ISBNFromLocalDB {
+    param([string]$isbn, [hashtable]$dbHashTable)
+    
+    if ($dbHashTable.ContainsKey($isbn)) {
+        return $dbHashTable[$isbn]
+    }
+    
+    return $null
+}
+
+function Add-ISBNToLocalDB {
+    param([string]$isbn, [object]$apiData, [hashtable]$dbHashTable, [string]$selectedFormat = 'Books')
+    
+    # Create new record for local database
+    $dbRecord = [PSCustomObject]@{
+        RCN = $isbn
+        subjects = ''
+        authors = ''
+        publishers = ''
+        publish_date = ''
+        number_of_pages = ''
+        enh_title = ''
+        lms_category = ''
+        category_debug = ''
+        last_updated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    }
+    
+    # Populate from API data
+    if ($apiData.subjects) { 
+        $dbRecord.subjects = ($apiData.subjects | ForEach-Object { $_.name }) -join '; ' 
+        # Calculate LMS category and debug info
+        $dbRecord.lms_category = Get-LMSCategory -subjects $apiData.subjects -format $selectedFormat
+        $dbRecord.category_debug = Get-CategoryDebug -subjects $apiData.subjects -format $selectedFormat
+    } else {
+        $dbRecord.lms_category = 'AF'
+        $dbRecord.category_debug = 'No subjects | Default: AF'
+    }
+    
+    if ($apiData.authors) { 
+        $dbRecord.authors = ($apiData.authors | ForEach-Object { $_.name }) -join '; ' 
+    }
+    if ($apiData.publishers) { 
+        $dbRecord.publishers = ($apiData.publishers | ForEach-Object { $_.name }) -join '; ' 
+    }
+    if ($apiData.publish_date) { 
+        $dbRecord.publish_date = $apiData.publish_date 
+    }
+    if ($apiData.number_of_pages) { 
+        $dbRecord.number_of_pages = $apiData.number_of_pages 
+    }
+    if ($apiData.title) { 
+        $dbRecord.enh_title = $apiData.title 
+    }
+    
+    # Add to hashtable
+    $dbHashTable[$isbn] = $dbRecord
+    
+    return $dbRecord
 }
 
 # LMS Category mapping function
@@ -205,6 +337,23 @@ function Get-LMSCategory {
     }
 }
 
+# Helper function to parse subjects from database string
+function Parse-SubjectsFromDB {
+    param([string]$subjectsString)
+    
+    if (-not $subjectsString) { return $null }
+    
+    $subjectNames = $subjectsString -split '; '
+    $subjects = @()
+    foreach ($name in $subjectNames) {
+        if ($name.Trim()) {
+            $subjects += [PSCustomObject]@{ name = $name.Trim() }
+        }
+    }
+    
+    return $subjects
+}
+
 # Debug function
 function Get-CategoryDebug {
     param([array]$subjects, [string]$format = 'Books')
@@ -221,10 +370,236 @@ function Get-CategoryDebug {
     return $debug
 }
 
+# FIXED: Apply data to CSV row - Enhanced version
+function Apply-DataToCSVRow {
+    param([object]$book, [object]$dataEntry, [array]$selectedAttributes, [string]$selectedFormat)
+    
+    foreach ($attr in $selectedAttributes) {
+        $val = ''
+        switch ($attr) {
+            'subjects' { 
+                $val = if ($dataEntry.subjects) { $dataEntry.subjects } else { '' } 
+            }
+            'lms_category' { 
+                $val = if ($dataEntry.lms_category -and $dataEntry.lms_category.Trim() -ne '') { 
+                    $dataEntry.lms_category 
+                } else {
+                    $subjects = Parse-SubjectsFromDB -subjectsString $dataEntry.subjects
+                    Get-LMSCategory -subjects $subjects -format $selectedFormat
+                }
+            }
+            'category_debug' { 
+                $val = if ($dataEntry.category_debug -and $dataEntry.category_debug.Trim() -ne '') { 
+                    $dataEntry.category_debug 
+                } else {
+                    $subjects = Parse-SubjectsFromDB -subjectsString $dataEntry.subjects
+                    Get-CategoryDebug -subjects $subjects -format $selectedFormat
+                }
+            }
+            'authors' { 
+                $val = if ($dataEntry.authors) { $dataEntry.authors } else { '' } 
+            }
+            'publishers' { 
+                $val = if ($dataEntry.publishers) { $dataEntry.publishers } else { '' } 
+            }
+            'enh_title' { 
+                $val = if ($dataEntry.enh_title) { $dataEntry.enh_title } else { '' } 
+            }
+            'publish_date' { 
+                $val = if ($dataEntry.publish_date) { $dataEntry.publish_date } else { '' } 
+            }
+            'number_of_pages' { 
+                $val = if ($dataEntry.number_of_pages) { $dataEntry.number_of_pages } else { '' } 
+            }
+        }
+        
+        # CRITICAL FIX: Ensure we're directly setting the property on the book object
+        if ($book.PSObject.Properties.Name -contains $attr) {
+            # Property exists, update it directly
+            $book.$attr = $val
+        } else {
+            # Property doesn't exist, add it
+            try {
+                $book | Add-Member -NotePropertyName $attr -NotePropertyValue $val -Force
+            } catch {
+                # Fallback: try different method
+                try {
+                    $book | Add-Member -MemberType NoteProperty -Name $attr -Value $val -Force
+                } catch {
+                    # Last resort: create new property manually
+                    $book.PSObject.Properties.Add((New-Object PSNoteProperty($attr, $val)))
+                }
+            }
+        }
+    }
+}
+
+# NEW FUNCTION: Process using Local DB Only
+function Start-LocalDBOnlyProcessing {
+    if (-not $comboField.SelectedItem -or -not $txtOutput.Text) { return }
+    
+    $selected = $clbAttrs.CheckedItems | ForEach-Object { $_ }
+    if ($selected.Count -eq 0) { 
+        [System.Windows.Forms.MessageBox]::Show("Please select at least one attribute to enrich.")
+        return 
+    }
+
+    if (-not $global:ValidISBNs) {
+        Update-ISBNValidation -fieldName $comboField.SelectedItem
+    }
+
+    if ($global:ValidISBNs.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No valid ISBN-10 codes found in the selected field.")
+        return
+    }
+
+    if ($global:LocalISBNDB.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Local database is empty. Please run regular processing first to build the database.")
+        return
+    }
+
+    $global:ProcessingActive = $true
+    $btnStart.Enabled = $false
+    $btnStop.Enabled = $true
+    $btnPause.Enabled = $false  # No pause for local-only processing
+    
+    $lblStatus.Text = "Processing with Local DB Only..."
+    $txtLog.AppendText("`r`n=== LOCAL DB ONLY PROCESSING STARTED ===`r`n")
+    
+    $totalRecords = $global:Books.Count
+    $processedCount = 0
+    $localHitCount = 0
+    $missedCount = 0
+    $actualEnrichments = 0
+    
+    $progressBar.Maximum = $totalRecords
+    $progressBar.Value = 0
+    
+    $selectedFormat = if ($comboFormat.SelectedItem -eq 'Audiobook/Spoken Word') { 'Audiobook' } else { 'Books' }
+    $keyField = $comboField.SelectedItem
+    
+    # Create a copy of the Books array to ensure we're working with the right data
+    $enrichedBooks = @()
+    
+    # Process all records instantly (no rate limiting needed)
+    for ($i = 0; $i -lt $totalRecords -and $global:ProcessingActive; $i++) {
+        $book = $global:Books[$i].PSObject.Copy()  # Create a copy to avoid reference issues
+        $idRaw = $book.$keyField
+        $validISBN = Get-ValidISBN10 -rawISBN $idRaw
+        
+        if ($validISBN) {
+            # Check if Update Existing mode and already has category
+            $shouldProcess = $true
+            if ($chkUpdateExisting.Checked) {
+                $currentCategory = $null
+                if ($book.PSObject.Properties.Name -contains 'lms_category') {
+                    $currentCategory = $book.lms_category
+                }
+                $shouldProcess = (-not $currentCategory -or $currentCategory.Trim() -eq '' -or $currentCategory.Trim() -eq 'NULL')
+            }
+            
+            if ($shouldProcess) {
+                # Check local database only
+                $localEntry = Get-ISBNFromLocalDB -isbn $validISBN -dbHashTable $global:LocalISBNDB
+                if ($localEntry) {
+                    # Apply enriched data to the book record
+                    Apply-DataToCSVRow -book $book -dataEntry $localEntry -selectedAttributes $selected -selectedFormat $selectedFormat
+                    
+                    $localHitCount++
+                    $actualEnrichments++
+                } else {
+                    $missedCount++
+                    
+                    # Still add empty columns for consistency
+                    foreach ($attr in $selected) {
+                        if (-not ($book.PSObject.Properties.Name -contains $attr)) {
+                            $book | Add-Member -NotePropertyName $attr -NotePropertyValue '' -Force
+                        }
+                    }
+                }
+            } else {
+                # Add empty columns for records that shouldn't be processed
+                foreach ($attr in $selected) {
+                    if (-not ($book.PSObject.Properties.Name -contains $attr)) {
+                        $book | Add-Member -NotePropertyName $attr -NotePropertyValue '' -Force
+                    }
+                }
+            }
+            $processedCount++
+        } else {
+            # Add empty columns for invalid ISBNs
+            foreach ($attr in $selected) {
+                if (-not ($book.PSObject.Properties.Name -contains $attr)) {
+                    $book | Add-Member -NotePropertyName $attr -NotePropertyValue '' -Force
+                }
+            }
+        }
+        
+        # Add the processed book to our enriched collection
+        $enrichedBooks += $book
+        
+        $progressBar.Value = $i + 1
+        $lblProgress.Text = "Progress: $($i + 1) / $totalRecords"
+        
+        if ($i % 100 -eq 0) {  # Update UI every 100 records
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+    }
+    
+    # Update the global Books array with our enriched data
+    $global:Books = $enrichedBooks
+    
+    # Save the enriched CSV file
+    if ($global:ProcessingActive) {
+        try {
+            $global:Books | Export-Csv -Path $txtOutput.Text -NoTypeInformation -Encoding UTF8
+            $txtLog.AppendText("Successfully saved enriched file to: $($txtOutput.Text)`r`n")
+            $txtLog.AppendText("Enriched $actualEnrichments records with new data columns.`r`n")
+            
+            # Verify the file was written correctly
+            $testImport = Import-Csv -Path $txtOutput.Text
+            $firstRecord = $testImport[0]
+            $addedColumns = @()
+            foreach ($attr in $selected) {
+                if ($firstRecord.PSObject.Properties.Name -contains $attr) {
+                    $addedColumns += $attr
+                }
+            }
+            $txtLog.AppendText("Verified: Added columns [$($addedColumns -join ', ')] to output file.`r`n")
+            
+            $txtLog.AppendText("`r`n=== LOCAL DB ONLY PROCESSING COMPLETE ===`r`n")
+            $txtLog.AppendText("Total records processed: $totalRecords`r`n")
+            $txtLog.AppendText("Valid ISBNs found: $processedCount`r`n")
+            $txtLog.AppendText("Local DB hits: $localHitCount`r`n")
+            $txtLog.AppendText("Local DB misses: $missedCount`r`n")
+            $txtLog.AppendText("Actual enrichments: $actualEnrichments`r`n")
+            
+            $efficiency = if ($processedCount -gt 0) { [Math]::Round(($localHitCount / $processedCount) * 100, 1) } else { 0 }
+            $txtLog.AppendText("Local DB efficiency: $efficiency%`r`n")
+            
+            $lblStatus.Text = "Local DB processing complete!"
+            
+            [System.Windows.Forms.MessageBox]::Show("Local DB Only Processing Complete!`r`n`r`nTotal ISBNs: $processedCount`r`nLocal DB hits: $localHitCount (instant)`r`nLocal DB misses: $missedCount`r`nActual enrichments: $actualEnrichments`r`nEfficiency: $efficiency%`r`n`r`nColumns added: $($addedColumns -join ', ')`r`nFile saved to: $($txtOutput.Text)")
+            
+        } catch {
+            $txtLog.AppendText("ERROR saving file: $_`r`n")
+            [System.Windows.Forms.MessageBox]::Show("Error saving file: $_")
+        }
+    } else {
+        $lblStatus.Text = "Local DB processing stopped by user"
+    }
+    
+    # Reset UI state
+    $global:ProcessingActive = $false
+    $btnStart.Enabled = $true
+    $btnStop.Enabled = $false
+    $btnPause.Enabled = $false
+}
+
 # Create form
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Continuous Book Enrichment - Large Catalogs"
-$form.Size = New-Object System.Drawing.Size(700, 750)
+$form.Text = "ISBN Enrichment - Local DB + API"
+$form.Size = New-Object System.Drawing.Size(700, 850)  # Made slightly taller
 $form.StartPosition = 'CenterScreen'
 
 # Input file controls
@@ -307,25 +682,48 @@ $comboFormat.DropDownStyle = 'DropDownList'
 $comboFormat.Items.AddRange(@('Books', 'Audiobook/Spoken Word'))
 $comboFormat.SelectedIndex = 0
 
+# Database statistics
+$lblDBStats = New-Object System.Windows.Forms.Label
+$lblDBStats.Text = 'Local DB: Not loaded'
+$lblDBStats.AutoSize = $true
+$lblDBStats.Location = '300,120'
+
+# Update existing checkbox
+$chkUpdateExisting = New-Object System.Windows.Forms.CheckBox
+$chkUpdateExisting.Text = 'Update Existing (fill missing lms_category only)'
+$chkUpdateExisting.Location = '10,155'
+$chkUpdateExisting.AutoSize = $true
+
+# NEW: Local DB Only checkbox
+$chkLocalDBOnly = New-Object System.Windows.Forms.CheckBox
+$chkLocalDBOnly.Text = 'Local DB Only (no API calls)'
+$chkLocalDBOnly.Location = '350,155'
+$chkLocalDBOnly.AutoSize = $true
+
 # Cycle counter display
 $lblCycleCount = New-Object System.Windows.Forms.Label
 $lblCycleCount.Text = 'Processing Cycle: 1'
 $lblCycleCount.AutoSize = $true
-$lblCycleCount.Location = '300,120'
+$lblCycleCount.Location = '10,185'
 
 $lblTotalProcessed = New-Object System.Windows.Forms.Label
 $lblTotalProcessed.Text = 'Total API Calls: 0'
 $lblTotalProcessed.AutoSize = $true
-$lblTotalProcessed.Location = '450,120'
+$lblTotalProcessed.Location = '150,185'
+
+$lblLocalHits = New-Object System.Windows.Forms.Label
+$lblLocalHits.Text = 'Local DB Hits: 0'
+$lblLocalHits.AutoSize = $true
+$lblLocalHits.Location = '300,185'
 
 # ISBN Validation Summary
 $lblValidation = New-Object System.Windows.Forms.Label
 $lblValidation.Text = 'ISBN Validation Summary:'
 $lblValidation.AutoSize = $true
-$lblValidation.Location = '10,155'
+$lblValidation.Location = '10,215'
 
 $txtValidation = New-Object System.Windows.Forms.TextBox
-$txtValidation.Location = '10,175'
+$txtValidation.Location = '10,235'
 $txtValidation.Size = New-Object System.Drawing.Size(650,20)
 $txtValidation.ReadOnly = $true
 $txtValidation.Text = 'Load a file and select lookup field to see validation summary'
@@ -334,10 +732,10 @@ $txtValidation.Text = 'Load a file and select lookup field to see validation sum
 $lblAttrs = New-Object System.Windows.Forms.Label
 $lblAttrs.Text = 'Attributes:'
 $lblAttrs.AutoSize = $true
-$lblAttrs.Location = '10,210'
+$lblAttrs.Location = '10,270'
 
 $clbAttrs = New-Object System.Windows.Forms.CheckedListBox
-$clbAttrs.Location = '100,207'
+$clbAttrs.Location = '100,267'
 $clbAttrs.Size = New-Object System.Drawing.Size(200,120)
 $attributes = @('subjects','authors','publishers','publish_date','number_of_pages','enh_title','lms_category','category_debug')
 foreach ($a in $attributes) { $clbAttrs.Items.Add($a) }
@@ -347,35 +745,35 @@ $clbAttrs.Enabled = $false
 $lblOutput = New-Object System.Windows.Forms.Label
 $lblOutput.Text = 'Output CSV:'
 $lblOutput.AutoSize = $true
-$lblOutput.Location = '10,345'
+$lblOutput.Location = '10,405'
 
 $txtOutput = New-Object System.Windows.Forms.TextBox
-$txtOutput.Location = '100,342'
+$txtOutput.Location = '100,402'
 $txtOutput.Width = 400
 $txtOutput.ReadOnly = $true
 
 $btnBrowseOutput = New-Object System.Windows.Forms.Button
 $btnBrowseOutput.Text = 'Save As...'
-$btnBrowseOutput.Location = '510,340'
+$btnBrowseOutput.Location = '510,400'
 $btnBrowseOutput.Width = 75
 $btnBrowseOutput.Enabled = $false
 
 # Processing controls
 $btnStart = New-Object System.Windows.Forms.Button
-$btnStart.Text = 'Start Continuous Processing'
-$btnStart.Location = '150,380'
+$btnStart.Text = 'Start Processing'
+$btnStart.Location = '150,440'
 $btnStart.Width = 180
 $btnStart.Enabled = $false
 
 $btnStop = New-Object System.Windows.Forms.Button
 $btnStop.Text = 'Stop'
-$btnStop.Location = '340,380'
+$btnStop.Location = '340,440'
 $btnStop.Width = 80
 $btnStop.Enabled = $false
 
 $btnPause = New-Object System.Windows.Forms.Button
 $btnPause.Text = 'Pause'
-$btnPause.Location = '430,380'
+$btnPause.Location = '430,440'
 $btnPause.Width = 80
 $btnPause.Enabled = $false
 
@@ -383,29 +781,29 @@ $btnPause.Enabled = $false
 $lblStatus = New-Object System.Windows.Forms.Label
 $lblStatus.Text = 'Status: Ready'
 $lblStatus.AutoSize = $true
-$lblStatus.Location = '10,420'
+$lblStatus.Location = '10,480'
 
 $lblProgress = New-Object System.Windows.Forms.Label
 $lblProgress.Text = 'Progress: 0 / 0'
 $lblProgress.AutoSize = $true
-$lblProgress.Location = '200,420'
+$lblProgress.Location = '200,480'
 
 $lblETA = New-Object System.Windows.Forms.Label
 $lblETA.Text = 'ETA: --'
 $lblETA.AutoSize = $true
-$lblETA.Location = '400,420'
+$lblETA.Location = '400,480'
 
 # Progress bar
 $progressBar = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Location = '10,450'
+$progressBar.Location = '10,510'
 $progressBar.Size = New-Object System.Drawing.Size(650,20)
 
 # Log box
 $txtLog = New-Object System.Windows.Forms.TextBox
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = 'Vertical'
-$txtLog.Location = '10,480'
-$txtLog.Size = New-Object System.Drawing.Size(650,220)
+$txtLog.Location = '10,540'
+$txtLog.Size = New-Object System.Drawing.Size(650,260)  # Made taller
 $txtLog.ReadOnly = $true
 
 # Add controls to form
@@ -413,7 +811,9 @@ $controls = @(
     $lblInput, $txtInput, $btnBrowseInput,
     $lblField, $comboField, $lblBatchSize, $numBatchSize,
     $lblInterval, $numInterval, $lblResume, $numResume,
-    $lblFormat, $comboFormat, $lblCycleCount, $lblTotalProcessed,
+    $lblFormat, $comboFormat, $lblDBStats,
+    $chkUpdateExisting, $chkLocalDBOnly,  # Added new checkbox
+    $lblCycleCount, $lblTotalProcessed, $lblLocalHits,
     $lblValidation, $txtValidation,
     $lblAttrs, $clbAttrs,
     $lblOutput, $txtOutput, $btnBrowseOutput,
@@ -432,7 +832,10 @@ $global:StartTime = $null
 $global:ProcessingSettings = $null
 $global:CycleCount = 1
 $global:TotalAPICalls = 0
+$global:LocalDBHits = 0
 $global:ProcessedISBNs = @{}
+$global:LocalISBNDB = @{}
+$global:ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Function to validate ISBNs in the dataset
 function Update-ISBNValidation {
@@ -446,8 +849,15 @@ function Update-ISBNValidation {
     $validCount = 0
     $invalidCount = 0
     $emptyCount = 0
+    $localDBCount = 0
+    $alreadyProcessedCount = 0
+    $hasLMSCategory = 0
+    $missingLMSCategory = 0
     
     $global:ValidISBNs = @()
+    
+    # Check if lms_category column exists
+    $hasLMSCategoryColumn = $global:Books[0].PSObject.Properties.Name -contains 'lms_category'
     
     foreach ($book in $global:Books) {
         $rawISBN = $book.$fieldName
@@ -458,6 +868,26 @@ function Update-ISBNValidation {
             if ($validISBN) {
                 $validCount++
                 $global:ValidISBNs += $validISBN
+                
+                # Check if it exists in local database
+                if ($global:LocalISBNDB.ContainsKey($validISBN)) {
+                    $localDBCount++
+                }
+                
+                # Check if already processed in this session
+                if ($global:ProcessedISBNs.ContainsKey($validISBN)) {
+                    $alreadyProcessedCount++
+                }
+                
+                # Check LMS category status if in update mode
+                if ($chkUpdateExisting.Checked -and $hasLMSCategoryColumn) {
+                    $currentCategory = $book.lms_category
+                    if ($currentCategory -and $currentCategory.Trim() -ne '' -and $currentCategory.Trim() -ne 'NULL' -and $currentCategory.Trim() -ne '0') {
+                        $hasLMSCategory++
+                    } else {
+                        $missingLMSCategory++
+                    }
+                }
             } else {
                 $invalidCount++
             }
@@ -465,22 +895,95 @@ function Update-ISBNValidation {
     }
     
     $totalRecords = $global:Books.Count
-    $txtValidation.Text = "Total: $totalRecords | Valid ISBNs: $validCount | Invalid: $invalidCount | Empty: $emptyCount"
+    $needingAPICall = $validCount - $localDBCount
+    $remainingToProcess = $validCount - $alreadyProcessedCount
+    
+    # Special handling for Local DB Only mode
+    if ($chkLocalDBOnly.Checked) {
+        $txtValidation.Text = "LOCAL DB ONLY MODE: Total: $totalRecords | Valid ISBNs: $validCount | In Local DB: $localDBCount | NOT in Local DB: $needingAPICall"
+    } elseif ($chkUpdateExisting.Checked -and $hasLMSCategoryColumn) {
+        # Adjust calculations for update existing mode
+        $needingUpdate = $missingLMSCategory
+        $missingNotInDB = 0
+        foreach ($book in $global:Books) {
+            $rawISBN = $book.$fieldName
+            $validISBN = Get-ValidISBN10 -rawISBN $rawISBN
+            if ($validISBN) {
+                $currentCategory = $book.lms_category
+                $isMissingCategory = (-not $currentCategory -or $currentCategory.Trim() -eq '')
+                $isInLocalDB = $global:LocalISBNDB.ContainsKey($validISBN)
+                if ($isMissingCategory -and -not $isInLocalDB) {
+                    $missingNotInDB++
+                }
+            }
+        }
+        $needingAPICall = $missingNotInDB
+        $txtValidation.Text = "UPDATE MODE: Total: $totalRecords | Valid ISBNs: $validCount | Has Category: $hasLMSCategory | Missing Category: $missingLMSCategory | Missing & Need API: $needingAPICall"
+    } else {
+        $txtValidation.Text = "Total: $totalRecords | Valid ISBNs: $validCount | Invalid: $invalidCount | Empty: $emptyCount | In Local DB: $localDBCount | Remaining: $remainingToProcess"
+    }
     
     if ($validCount -gt 0) {
-        $totalBatches = [Math]::Ceiling($validCount / $numBatchSize.Value)
+        $totalBatches = [Math]::Ceiling($needingAPICall / $numBatchSize.Value)
         $estimatedHours = [Math]::Round(($totalBatches * $numInterval.Value) / 60, 1)
         
         $txtLog.AppendText("ISBN Validation Complete:`r`n")
+        $txtLog.AppendText("- Total records: $totalRecords`r`n")
         $txtLog.AppendText("- Valid ISBN-10 codes: $validCount`r`n")
+        $txtLog.AppendText("- Already in local DB: $localDBCount`r`n")
+        
+        if ($chkLocalDBOnly.Checked) {
+            $txtLog.AppendText("LOCAL DB ONLY MODE:`r`n")
+            $txtLog.AppendText("- Can be enriched from local DB: $localDBCount`r`n")
+            $txtLog.AppendText("- NOT in local DB (will be skipped): $needingAPICall`r`n")
+            $txtLog.AppendText("- Processing time: INSTANT (no API calls)`r`n")
+        } elseif ($chkUpdateExisting.Checked) {
+            if ($hasLMSCategoryColumn) {
+                $txtLog.AppendText("UPDATE EXISTING MODE:`r`n")
+                $txtLog.AppendText("- Records with lms_category: $hasLMSCategory`r`n")
+                $txtLog.AppendText("- Records missing lms_category: $missingLMSCategory`r`n")
+                
+                if ($missingLMSCategory -eq 0) {
+                    $txtLog.AppendText("*** ALL RECORDS ALREADY HAVE CATEGORIES - NO PROCESSING NEEDED! ***`r`n")
+                    [System.Windows.Forms.MessageBox]::Show("Update Existing Mode: All $hasLMSCategory records already have lms_category values.`r`n`r`nNo processing needed - stopping now!")
+                    return
+                }
+                
+                if ($needingAPICall -eq 0) {
+                    $txtLog.AppendText("*** ALL MISSING CATEGORIES CAN BE FILLED FROM LOCAL DB - NO API CALLS NEEDED! ***`r`n")
+                }
+            } else {
+                $txtLog.AppendText("UPDATE EXISTING MODE: lms_category column will be added`r`n")
+            }
+        }
+        
+        $txtLog.AppendText("- Requiring API calls: $needingAPICall`r`n")
+        $txtLog.AppendText("- Remaining to process: $remainingToProcess`r`n")
         $txtLog.AppendText("- Invalid/malformed: $invalidCount`r`n")
         $txtLog.AppendText("- Empty fields: $emptyCount`r`n")
-        $txtLog.AppendText("Estimated processing time per cycle: $estimatedHours hours ($totalBatches batches)`r`n")
+        
+        if (-not $chkLocalDBOnly.Checked) {
+            $txtLog.AppendText("Estimated API processing time per cycle: $estimatedHours hours ($totalBatches batches)`r`n")
+        }
+        
+        if ($needingAPICall -eq 0 -and -not $chkLocalDBOnly.Checked) {
+            $txtLog.AppendText("*** ALL ISBNs ARE ALREADY IN LOCAL DATABASE - NO API CALLS NEEDED! ***`r`n")
+        }
+        
+        $txtLog.AppendText("Local DB contains $($global:LocalISBNDB.Count) total records`r`n")
+        $efficiency = if ($validCount -gt 0) { [Math]::Round(($localDBCount / $validCount) * 100, 1) } else { 0 }
+        $txtLog.AppendText("Local DB coverage: $efficiency% of valid ISBNs`r`n")
     }
 }
 
-# Function to start processing
+# FIXED: Function to start processing with enhanced CSV updating
 function Start-ProcessingJob {
+    # Check if Local DB Only mode is selected
+    if ($chkLocalDBOnly.Checked) {
+        Start-LocalDBOnlyProcessing
+        return
+    }
+    
     if (-not $comboField.SelectedItem -or -not $txtOutput.Text) { return }
     
     $selected = $clbAttrs.CheckedItems | ForEach-Object { $_ }
@@ -496,6 +999,28 @@ function Start-ProcessingJob {
     if ($global:ValidISBNs.Count -eq 0) {
         [System.Windows.Forms.MessageBox]::Show("No valid ISBN-10 codes found in the selected field.")
         return
+    }
+
+    # Check if Update Existing mode and all categories are filled
+    if ($chkUpdateExisting.Checked) {
+        $hasLMSCategoryColumn = $global:Books[0].PSObject.Properties.Name -contains 'lms_category'
+        if ($hasLMSCategoryColumn) {
+            $actualMissingCount = 0
+            
+            foreach ($book in $global:Books) {
+                $currentCategory = $book.lms_category
+                if (-not $currentCategory -or $currentCategory.Trim() -eq '' -or $currentCategory.Trim() -eq 'NULL' -or $currentCategory.Trim() -eq '0') {
+                    $actualMissingCount++
+                }
+            }
+            
+            if ($actualMissingCount -eq 0) {
+                $txtLog.AppendText("*** ALL RECORDS HAVE CATEGORIES - NO PROCESSING NEEDED! ***`r`n")
+                $lblStatus.Text = "UPDATE MODE: All categories filled - no work needed"
+                [System.Windows.Forms.MessageBox]::Show("Update Existing Mode: All $($global:Books.Count) records already have lms_category values.`r`n`r`nNo processing needed!")
+                return
+            }
+        }
     }
 
     $global:ProcessingSettings = @{
@@ -523,10 +1048,11 @@ function Start-ProcessingJob {
     
     $lblCycleCount.Text = "Processing Cycle: $global:CycleCount"
     $lblTotalProcessed.Text = "Total API Calls: $global:TotalAPICalls"
+    $lblLocalHits.Text = "Local DB Hits: $global:LocalDBHits"
     
     if ($global:CycleCount -eq 1) {
         $txtLog.Clear()
-        $txtLog.AppendText("Starting continuous processing until all ISBNs are enriched...`r`n")
+        $txtLog.AppendText("Starting processing - checking local DB first, then API calls...`r`n")
     } else {
         $txtLog.AppendText("`r`n=== CYCLE $global:CycleCount STARTED ===`r`n")
     }
@@ -535,12 +1061,27 @@ function Start-ProcessingJob {
     $txtLog.AppendText("Starting from record: $($global:ProcessingSettings.StartFrom + 1)`r`n")
     $txtLog.AppendText("Valid ISBNs to process: $($global:ValidISBNs.Count)`r`n")
     $txtLog.AppendText("Already processed ISBNs: $($global:ProcessedISBNs.Count)`r`n")
+    $txtLog.AppendText("Local database contains: $($global:LocalISBNDB.Count) ISBNs`r`n")
+    
+    # CRITICAL: Add empty columns to ALL records BEFORE processing begins
+    $txtLog.AppendText("Adding selected attribute columns to all records...`r`n")
+    foreach ($book in $global:Books) {
+        foreach ($attr in $global:ProcessingSettings.SelectedAttributes) {
+            if (-not ($book.PSObject.Properties.Name -contains $attr)) {
+                $book | Add-Member -NotePropertyName $attr -NotePropertyValue '' -Force
+            }
+        }
+    }
+    $txtLog.AppendText("All records now have columns: $($global:ProcessingSettings.SelectedAttributes -join ', ')`r`n")
     
     $apiCallCount = 0
     $validISBNsProcessed = 0
     $newEnrichmentsThisCycle = 0
+    $localHitsThisCycle = 0
+    $newDBEntries = 0
+    $dbUpdatesPending = $false
     
-    # Process in batches
+    # Process in batches (similar to working script)
     for ($i = $global:ProcessingSettings.StartFrom; $i -lt $totalRecords -and $global:ProcessingActive; $i += $global:ProcessingSettings.BatchSize) {
         # Check for pause
         while ($global:ProcessingPaused -and $global:ProcessingActive) {
@@ -576,50 +1117,85 @@ function Start-ProcessingJob {
             $validISBN = Get-ValidISBN10 -rawISBN $idRaw
             
             if ($validISBN -and -not $global:ProcessedISBNs.ContainsKey($validISBN)) {
-                $url = "https://openlibrary.org/api/books?bibkeys=ISBN:$validISBN&jscmd=data&format=json"
-                try {
-                    $resp = Invoke-RestMethod -Uri $url -ErrorAction Stop
-                    $entry = $resp."ISBN:$validISBN"
-                    $apiCallCount++
-                    $global:TotalAPICalls++
-                    $batchAPICallCount++
-                    $validISBNsProcessed++
-                    
-                    if ($entry) {
-                        $newEnrichmentsThisCycle++
-                        $global:ProcessedISBNs[$validISBN] = $true
-                        
-                        foreach ($attr in $global:ProcessingSettings.SelectedAttributes) {
-                            $val = ''
-                            switch ($attr) {
-                                'subjects'   { if ($entry.subjects) { $val = ($entry.subjects | ForEach-Object { $_.name }) -join '; ' } }
-                                'lms_category' { $val = Get-LMSCategory -subjects $entry.subjects -format $global:ProcessingSettings.SelectedFormat }
-                                'category_debug' { $val = Get-CategoryDebug -subjects $entry.subjects -format $global:ProcessingSettings.SelectedFormat }
-                                'authors'    { if ($entry.authors) { $val = ($entry.authors | ForEach-Object { $_.name }) -join '; ' } }
-                                'publishers' { if ($entry.publishers) { $val = ($entry.publishers | ForEach-Object { $_.name }) -join '; ' } }
-                                'enh_title'  { if ($entry.title) { $val = $entry.title } }
-                                default      {
-                                    if ($entry.PSObject.Properties.Name -contains $attr) {
-                                        $x = $entry.$attr
-                                        $val = if ($x -is [System.Array]) { $x -join '; ' } else { $x }
-                                    }
-                                }
-                            }
-                            $book | Add-Member -NotePropertyName $attr -NotePropertyValue $val -Force
-                        }
+                # In update existing mode, only process if lms_category is missing
+                $shouldProcess = $true
+                if ($chkUpdateExisting.Checked) {
+                    $currentCategory = $null
+                    if ($book.PSObject.Properties.Name -contains 'lms_category') {
+                        $currentCategory = $book.lms_category
                     }
-                } catch {
-                    # Silently continue on errors to avoid spam
+                    $shouldProcess = (-not $currentCategory -or $currentCategory.Trim() -eq '')
                 }
                 
-                Start-Sleep -Milliseconds 100
+                if ($shouldProcess) {
+                    # FIRST: Check local database
+                    $localEntry = Get-ISBNFromLocalDB -isbn $validISBN -dbHashTable $global:LocalISBNDB
+                    if ($localEntry) {
+                        # Use local database entry (instant) and apply to CSV
+                        Apply-DataToCSVRow -book $book -dataEntry $localEntry -selectedAttributes $global:ProcessingSettings.SelectedAttributes -selectedFormat $global:ProcessingSettings.SelectedFormat
+                        
+                        $newEnrichmentsThisCycle++
+                        $global:ProcessedISBNs[$validISBN] = $true
+                        $localHitsThisCycle++
+                        $global:LocalDBHits++
+                        $validISBNsProcessed++
+                        
+                        # Verify local data was applied
+                        $verifyValues = @()
+                        foreach ($attr in $global:ProcessingSettings.SelectedAttributes) {
+                            $verifyValues += "$attr='$($book.$attr)'"
+                        }
+                        $txtLog.AppendText("  Local DB hit for ISBN ${validISBN}: $($verifyValues -join ', ')`r`n")
+                    } else {
+                        # SECOND: Make API call if not in local database
+                        $url = "https://openlibrary.org/api/books?bibkeys=ISBN:$validISBN&jscmd=data&format=json"
+                        try {
+                            $resp = Invoke-RestMethod -Uri $url -ErrorAction Stop
+                            $apiEntry = $resp."ISBN:$validISBN"
+                            $apiCallCount++
+                            $global:TotalAPICalls++
+                            $batchAPICallCount++
+                            $validISBNsProcessed++
+                            
+                            if ($apiEntry) {
+                                # Add to local database
+                                $entry = Add-ISBNToLocalDB -isbn $validISBN -apiData $apiEntry -dbHashTable $global:LocalISBNDB -selectedFormat $global:ProcessingSettings.SelectedFormat
+                                $newDBEntries++
+                                $dbUpdatesPending = $true
+                                
+                                # CRITICAL: Apply enriched data to the CSV row
+                                Apply-DataToCSVRow -book $book -dataEntry $entry -selectedAttributes $global:ProcessingSettings.SelectedAttributes -selectedFormat $global:ProcessingSettings.SelectedFormat
+                                
+                                # DEBUGGING: Verify the data was applied
+                                $appliedValues = @()
+                                foreach ($attr in $global:ProcessingSettings.SelectedAttributes) {
+                                    $appliedValues += "$attr='$($book.$attr)'"
+                                }
+                                $txtLog.AppendText("  API enriched ISBN ${validISBN}: $($appliedValues -join ', ')`r`n")
+                                
+                                $newEnrichmentsThisCycle++
+                                $global:ProcessedISBNs[$validISBN] = $true
+                            } else {
+                                # Mark as processed even if no data found
+                                $global:ProcessedISBNs[$validISBN] = $true
+                                $txtLog.AppendText("  API returned no data for ISBN ${validISBN}`r`n")
+                            }
+                        } catch {
+                            $txtLog.AppendText("  API error for ISBN ${validISBN}: $_`r`n")
+                        }
+                        
+                        # API rate limiting delay
+                        Start-Sleep -Milliseconds 100
+                    }
+                }
             }
             
             $progressBar.Value = $j + 1
-            $lblProgress.Text = "Progress: $($j + 1) / $totalRecords (API calls: $global:TotalAPICalls)"
+            $lblProgress.Text = "Progress: $($j + 1) / $totalRecords"
             $lblTotalProcessed.Text = "Total API Calls: $global:TotalAPICalls"
+            $lblLocalHits.Text = "Local DB Hits: $global:LocalDBHits"
             
-            # Calculate ETA based on remaining unprocessed ISBNs
+            # Calculate ETA
             if ($validISBNsProcessed -gt 0) {
                 $elapsed = (Get-Date) - $global:StartTime
                 $remainingISBNs = $global:ValidISBNs.Count - $global:ProcessedISBNs.Count
@@ -636,12 +1212,41 @@ function Start-ProcessingJob {
             [System.Windows.Forms.Application]::DoEvents()
         }
         
-        # Save progress after each batch
+        # CRITICAL FIX: Save progress after each batch - this ensures CSV gets the enriched data
         try {
             $global:Books | Export-Csv -Path $global:ProcessingSettings.OutputPath -NoTypeInformation -Encoding UTF8
-            $txtLog.AppendText("Batch $batchNumber completed. API calls in batch: $batchAPICallCount. Progress saved.`r`n")
+            $txtLog.AppendText("Batch $batchNumber completed. API calls: $batchAPICallCount, Local hits: $localHitsThisCycle. ENRICHED DATA SAVED to output file.`r`n")
+            
+            # Verify the save worked by checking the first enriched record
+            if ($newEnrichmentsThisCycle -gt 0) {
+                $testImport = Import-Csv -Path $global:ProcessingSettings.OutputPath -ErrorAction SilentlyContinue
+                if ($testImport -and $testImport.Count -gt 0) {
+                    $hasAllColumns = $true
+                    foreach ($attr in $global:ProcessingSettings.SelectedAttributes) {
+                        if (-not ($testImport[0].PSObject.Properties.Name -contains $attr)) {
+                            $hasAllColumns = $false
+                            break
+                        }
+                    }
+                    if ($hasAllColumns) {
+                        $txtLog.AppendText("VERIFIED: CSV file contains all selected columns.`r`n")
+                    } else {
+                        $txtLog.AppendText("WARNING: CSV file missing some selected columns!`r`n")
+                    }
+                }
+            }
         } catch {
             $txtLog.AppendText("Failed to save progress: $_`r`n")
+        }
+        
+        # Save local database updates if there are new entries
+        if ($dbUpdatesPending -and $newDBEntries -gt 0) {
+            if (Save-LocalISBNDatabase -dbHashTable $global:LocalISBNDB -scriptPath $global:ScriptPath) {
+                $txtLog.AppendText("Updated local ISBN database with $newDBEntries new entries.`r`n")
+                $lblDBStats.Text = "Local DB: $($global:LocalISBNDB.Count) records"
+                $newDBEntries = 0
+                $dbUpdatesPending = $false
+            }
         }
         
         # Update resume point for potential restart
@@ -655,7 +1260,6 @@ function Start-ProcessingJob {
             
             $waitSeconds = $global:ProcessingSettings.IntervalMinutes * 60
             for ($wait = 0; $wait -lt $waitSeconds -and $global:ProcessingActive; $wait++) {
-                # Check for pause during wait
                 while ($global:ProcessingPaused -and $global:ProcessingActive) {
                     $lblStatus.Text = "Processing paused during wait - click Start to resume"
                     Start-Sleep -Seconds 1
@@ -664,22 +1268,15 @@ function Start-ProcessingJob {
                 
                 if (-not $global:ProcessingActive) { break }
                 
-                # Calculate remaining time
                 $remainingSeconds = $waitSeconds - $wait
                 $remainingMinutes = [Math]::Floor($remainingSeconds / 60)
                 $remainingSecondsDisplay = $remainingSeconds % 60
                 
-                # Update status with countdown every second
                 $lblStatus.Text = "Waiting... ${remainingMinutes}:${remainingSecondsDisplay:D2} remaining before next batch"
-                
-                # Process Windows messages to keep UI responsive
                 [System.Windows.Forms.Application]::DoEvents()
-                
-                # Sleep for 1 second
                 Start-Sleep -Seconds 1
             }
             
-            # Clear waiting status and continue
             if ($global:ProcessingActive) {
                 $lblStatus.Text = "Wait complete. Starting next batch..."
                 $txtLog.AppendText("Wait complete. Starting next batch...`r`n")
@@ -689,13 +1286,48 @@ function Start-ProcessingJob {
         }
     }
     
+    # Final save of both CSV and local database
+    try {
+        $global:Books | Export-Csv -Path $global:ProcessingSettings.OutputPath -NoTypeInformation -Encoding UTF8
+        $txtLog.AppendText("FINAL SAVE: All enriched data saved to CSV file.`r`n")
+        
+        # Final verification
+        $finalImport = Import-Csv -Path $global:ProcessingSettings.OutputPath -ErrorAction SilentlyContinue
+        if ($finalImport -and $finalImport.Count -gt 0) {
+            $enrichedCount = 0
+            foreach ($record in $finalImport) {
+                foreach ($attr in $global:ProcessingSettings.SelectedAttributes) {
+                    if ($record.$attr -and $record.$attr.Trim() -ne '') {
+                        $enrichedCount++
+                        break
+                    }
+                }
+            }
+            $txtLog.AppendText("FINAL VERIFICATION: $enrichedCount records have enriched data in the CSV file.`r`n")
+        }
+    } catch {
+        $txtLog.AppendText("ERROR on final CSV save: $_`r`n")
+    }
+    
+    # Final save of local database if there are pending updates
+    if ($dbUpdatesPending -and $newDBEntries -gt 0) {
+        if (Save-LocalISBNDatabase -dbHashTable $global:LocalISBNDB -scriptPath $global:ScriptPath) {
+            $txtLog.AppendText("Final update to local ISBN database with $newDBEntries new entries.`r`n")
+            $lblDBStats.Text = "Local DB: $($global:LocalISBNDB.Count) records"
+        }
+    }
+    
     # Processing completed or stopped
     if ($global:ProcessingActive) {
-        $txtLog.AppendText("`r`nCycle $global:CycleCount completed! New enrichments this cycle: $newEnrichmentsThisCycle`r`n")
-        $txtLog.AppendText("Total API calls in this cycle: $apiCallCount`r`n")
-        $txtLog.AppendText("Total ISBNs processed so far: $($global:ProcessedISBNs.Count) / $($global:ValidISBNs.Count)`r`n")
+        $txtLog.AppendText("`r`nCycle $global:CycleCount completed!`r`n")
+        $txtLog.AppendText("EFFICIENCY SUMMARY:`r`n")
+        $txtLog.AppendText("- Instant local DB hits: $localHitsThisCycle`r`n")
+        $txtLog.AppendText("- API calls needed: $apiCallCount`r`n")
+        $txtLog.AppendText("- New database entries: $newDBEntries`r`n")
+        $txtLog.AppendText("- Total enrichments: $newEnrichmentsThisCycle`r`n")
+        $txtLog.AppendText("- Total ISBNs processed so far: $($global:ProcessedISBNs.Count) / $($global:ValidISBNs.Count)`r`n")
         
-        # Check if all ISBNs have been processed OR if we've gone through all records
+        # Check if all ISBNs have been processed
         $allRecordsProcessed = ($progressBar.Value -ge $totalRecords)
         $allISBNsProcessed = ($global:ProcessedISBNs.Count -ge $global:ValidISBNs.Count)
         
@@ -703,26 +1335,36 @@ function Start-ProcessingJob {
             $lblStatus.Text = "PROCESSING COMPLETE! All records have been processed."
             $txtLog.AppendText("`r`n=== PROCESSING COMPLETE ===`r`n")
             $txtLog.AppendText("All records in the file have been processed.`r`n")
-            $txtLog.AppendText("Total API calls made: $global:TotalAPICalls`r`n")
-            $txtLog.AppendText("Total processing cycles: $global:CycleCount`r`n")
-            $txtLog.AppendText("ISBNs successfully enriched: $($global:ProcessedISBNs.Count)`r`n")
+            $txtLog.AppendText("FINAL EFFICIENCY STATS:`r`n")
+            $txtLog.AppendText("- Total API calls made: $global:TotalAPICalls`r`n")
+            $txtLog.AppendText("- Total local DB hits: $global:LocalDBHits`r`n")
+            $txtLog.AppendText("- Total processing cycles: $global:CycleCount`r`n")
+            $txtLog.AppendText("- ISBNs successfully enriched: $($global:ProcessedISBNs.Count)`r`n")
+            $txtLog.AppendText("- Local database now contains: $($global:LocalISBNDB.Count) ISBNs`r`n")
             
-            [System.Windows.Forms.MessageBox]::Show("Processing Complete!`r`n`r`nAll records have been processed.`r`nTotal API calls: $global:TotalAPICalls`r`nTotal cycles: $global:CycleCount`r`nISBNs enriched: $($global:ProcessedISBNs.Count)`r`nFile saved to: $($global:ProcessingSettings.OutputPath)")
+            $efficiency = if ($global:TotalAPICalls + $global:LocalDBHits -gt 0) {
+                [Math]::Round(($global:LocalDBHits / ($global:TotalAPICalls + $global:LocalDBHits)) * 100, 1)
+            } else { 0 }
+            
+            $txtLog.AppendText("- Local DB efficiency: $efficiency%`r`n")
+            
+            [System.Windows.Forms.MessageBox]::Show("Processing Complete!`r`n`r`nAll records have been processed and enriched data has been saved to the CSV file.`r`nLocal DB hits: $global:LocalDBHits (instant)`r`nAPI calls: $global:TotalAPICalls (rate limited)`r`nEfficiency: $efficiency%`r`nTotal cycles: $global:CycleCount`r`nFile saved to: $($global:ProcessingSettings.OutputPath)")
             
             # Reset for potential new run
             $global:ProcessedISBNs = @{}
             $global:CycleCount = 1
             $global:TotalAPICalls = 0
+            $global:LocalDBHits = 0
         } elseif ($newEnrichmentsThisCycle -eq 0) {
-            # If no new enrichments were found this cycle, stop to avoid endless cycling
+            # If no new enrichments were found this cycle, stop to avoid cycling
             $lblStatus.Text = "NO NEW ENRICHMENTS FOUND - Processing stopped."
             $txtLog.AppendText("`r`n=== NO NEW ENRICHMENTS FOUND ===`r`n")
-            $txtLog.AppendText("No new data was found in this cycle. Stopping to avoid endless cycling.`r`n")
+            $txtLog.AppendText("No new data was found in this cycle.`r`n")
             $txtLog.AppendText("You may want to try again later as the OpenLibrary database is updated frequently.`r`n")
             
-            [System.Windows.Forms.MessageBox]::Show("No new enrichments found in this cycle.`r`n`r`nProcessing stopped to avoid endless cycling.`r`nTotal API calls: $global:TotalAPICalls`r`nISBNs enriched: $($global:ProcessedISBNs.Count)")
+            [System.Windows.Forms.MessageBox]::Show("No new enrichments found in this cycle.`r`n`r`nProcessing complete. Enriched data has been saved to the CSV file.`r`nTotal API calls: $global:TotalAPICalls`r`nLocal DB hits: $global:LocalDBHits`r`nISBNs enriched: $($global:ProcessedISBNs.Count)")
         } else {
-            # Continue cycling only if we haven't processed all records AND we found new enrichments
+            # Continue cycling only if we found new enrichments
             $lblStatus.Text = "Cycle complete. Starting next cycle immediately..."
             $txtLog.AppendText("Auto-starting next cycle immediately...`r`n")
             
@@ -742,7 +1384,7 @@ function Start-ProcessingJob {
         }
     } else {
         $lblStatus.Text = "Processing stopped by user"
-        $txtLog.AppendText("`r`nProcessing stopped. You can resume from record $($progressBar.Value).`r`n")
+        $txtLog.AppendText("`r`nProcessing stopped. You can resume from where you left off.`r`n")
     }
     
     # Reset UI state
@@ -753,12 +1395,101 @@ function Start-ProcessingJob {
     $btnPause.Enabled = $false
 }
 
+# Event handlers for checkboxes
+$chkUpdateExisting.Add_CheckedChanged({
+    # Auto-select lms_category when in update mode
+    if ($chkUpdateExisting.Checked) {
+        for ($i = 0; $i -lt $clbAttrs.Items.Count; $i++) {
+            if ($clbAttrs.Items[$i] -eq 'lms_category') {
+                $clbAttrs.SetItemChecked($i, $true)
+            } else {
+                $clbAttrs.SetItemChecked($i, $false)
+            }
+        }
+        $txtLog.AppendText("Update Existing mode enabled - will only update missing lms_category fields.`r`n")
+        
+        # Immediately check if there's any work to do
+        if ($global:Books -and $comboField.SelectedItem) {
+            $hasLMSCategoryColumn = $global:Books[0].PSObject.Properties.Name -contains 'lms_category'
+            if ($hasLMSCategoryColumn) {
+                $actualMissingCount = 0
+                foreach ($book in $global:Books) {
+                    $currentCategory = $book.lms_category
+                    if (-not $currentCategory -or $currentCategory.Trim() -eq '' -or $currentCategory.Trim() -eq 'NULL' -or $currentCategory.Trim() -eq '0') {
+                        $actualMissingCount++
+                    }
+                }
+                
+                if ($actualMissingCount -eq 0) {
+                    $txtLog.AppendText("*** NOTICE: ALL $($global:Books.Count) RECORDS ALREADY HAVE CATEGORIES - NO WORK NEEDED! ***`r`n")
+                    $txtValidation.Text = "UPDATE MODE: All $($global:Books.Count) records have categories - NO PROCESSING NEEDED"
+                } else {
+                    $txtLog.AppendText("Found $actualMissingCount records that need category updates.`r`n")
+                }
+            }
+        }
+    }
+    
+    # Re-validate when checkbox changes
+    if ($comboField.SelectedItem -and $global:Books) {
+        Update-ISBNValidation -fieldName $comboField.SelectedItem
+    }
+})
+
+# Event handler for Local DB Only checkbox
+$chkLocalDBOnly.Add_CheckedChanged({
+    if ($chkLocalDBOnly.Checked) {
+        $txtLog.AppendText("Local DB Only mode enabled - will use local database only, no API calls will be made.`r`n")
+        
+        # Disable batch controls since they're not needed for local-only processing
+        $numBatchSize.Enabled = $false
+        $numInterval.Enabled = $false
+        $numResume.Enabled = $false
+        $btnPause.Enabled = $false
+        
+        # Update button text
+        $btnStart.Text = 'Start Local Processing'
+        
+        # Show expected efficiency
+        if ($global:Books -and $comboField.SelectedItem -and $global:ValidISBNs) {
+            $localAvailable = 0
+            foreach ($isbn in $global:ValidISBNs) {
+                if ($global:LocalISBNDB.ContainsKey($isbn)) {
+                    $localAvailable++
+                }
+            }
+            $txtLog.AppendText("Local DB Only: $localAvailable out of $($global:ValidISBNs.Count) valid ISBNs can be enriched instantly.`r`n")
+        }
+    } else {
+        $txtLog.AppendText("Local DB Only mode disabled - will use local database first, then API calls for missing data.`r`n")
+        
+        # Re-enable batch controls
+        $numBatchSize.Enabled = $true
+        $numInterval.Enabled = $true
+        $numResume.Enabled = $true
+        $btnPause.Enabled = $true
+        
+        # Restore button text
+        $btnStart.Text = 'Start Processing'
+    }
+    
+    # Re-validate when checkbox changes
+    if ($comboField.SelectedItem -and $global:Books) {
+        Update-ISBNValidation -fieldName $comboField.SelectedItem
+    }
+})
+
 # Browse Input event
 $btnBrowseInput.Add_Click({
     $ofd = New-Object System.Windows.Forms.OpenFileDialog
     $ofd.Filter = 'CSV Files (*.csv)|*.csv'
     if ($ofd.ShowDialog() -eq 'OK') {
         $txtInput.Text = $ofd.FileName
+        
+        # Initialize local ISBN database from script directory
+        $global:LocalISBNDB = Initialize-LocalISBNDatabase -scriptPath $global:ScriptPath
+        $lblDBStats.Text = "Local DB: $($global:LocalISBNDB.Count) records"
+        
         try {
             $global:Books = Import-Csv -Path $ofd.FileName
             if ($global:Books.Count -gt 0) {
@@ -773,14 +1504,18 @@ $btnBrowseInput.Add_Click({
                 $numResume.Value = 0  # Reset to 0 when loading new file
                 
                 $txtLog.AppendText("Loaded $($global:Books.Count) records.`r`n")
+                $txtLog.AppendText("Local ISBN database initialized with $($global:LocalISBNDB.Count) existing entries.`r`n")
+                $txtLog.AppendText("Database location: $(Join-Path $global:ScriptPath 'ISBN-Enhanced-DB.csv')`r`n")
                 $txtLog.AppendText("Select lookup field to validate ISBNs and see time estimate.`r`n")
                 
                 # Reset processing state when loading new file
                 $global:ProcessedISBNs = @{}
                 $global:CycleCount = 1
                 $global:TotalAPICalls = 0
+                $global:LocalDBHits = 0
                 $lblCycleCount.Text = "Processing Cycle: 1"
                 $lblTotalProcessed.Text = "Total API Calls: 0"
+                $lblLocalHits.Text = "Local DB Hits: 0"
             }
         } catch {
             [System.Windows.Forms.MessageBox]::Show("Failed to load CSV: $_")
@@ -834,6 +1569,13 @@ $btnPause.Add_Click({
         $lblStatus.Text = "Processing paused"
     }
 })
+
+# Initialize the script path and local database on startup
+$global:ScriptPath = if ($MyInvocation.MyCommand.Path) { 
+    Split-Path -Parent $MyInvocation.MyCommand.Path 
+} else { 
+    Get-Location 
+}
 
 # Show the form
 [void]$form.ShowDialog()
