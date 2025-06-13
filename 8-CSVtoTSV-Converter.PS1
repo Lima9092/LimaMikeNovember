@@ -1,3 +1,15 @@
+# Minimize the PowerShell command prompt
+Add-Type @"
+    using System;
+    using System.Runtime.InteropServices;
+    public class Win32 {
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        [DllImport("kernel32.dll", ExactSpelling = true)]
+        public static extern IntPtr GetConsoleWindow();
+    }
+"@
 # Custom naming convention reminder function
 function Show-NamingConventionReminder {
     $customDialog = New-Object System.Windows.Forms.Form
