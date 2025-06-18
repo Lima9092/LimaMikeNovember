@@ -129,6 +129,19 @@ function AdultFictionTransform($value) {
     # If not a valid ISBN-10 return blank
     return ''
 }
-
-# Register it in your in-memory lookup
 $global:TransformFunctions['AdultFictionTransform'] = ${function:AdultFictionTransform}
+
+function RemoveSlashSuffixTransform {
+    param($value)
+    if (-not $value) { return '' }
+    $n = $value.Trim()
+    if ($n -match '/') {
+        # Remove forward slash and everything after it
+        return ($n -split '/')[0].Trim()
+    }
+    else {
+        # No slash found, return original trimmed value
+        return $n
+    }
+}
+$global:TransformFunctions['RemoveSlashSuffixTransform'] = ${function:RemoveSlashSuffixTransform}
