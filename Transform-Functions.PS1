@@ -145,3 +145,20 @@ function RemoveSlashSuffixTransform {
     }
 }
 $global:TransformFunctions['RemoveSlashSuffixTransform'] = ${function:RemoveSlashSuffixTransform}
+
+function ExcludeNonPRN {
+    param($value)
+    if (-not $value) { return '' }
+    $n = $value.Trim()
+    # Only allow values matching ANNNNAA where A = alphanumeric, N = digit
+    if ($n -match '^[A-Za-z0-9][0-9]{4}[A-Za-z0-9]{2}$') {
+        return $n
+    }
+    else {
+        return ''
+    }
+}
+
+$global:TransformFunctions['ExcludeNonPRN'] = ${function:ExcludeNonPRN}
+
+
