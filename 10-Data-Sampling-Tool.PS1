@@ -1,130 +1,3 @@
-# Updated Perform-UsersSampling - Handles 3-character suffix, no source counting
-function Perform-UsersSampling {
-    param($OriginalData, $MigratedData, $ColumnMappings, $SampleSize)
-    
-    $report = @()
-    $report += "USERS SAMPLING ANALYSIS:"
-    $report += "-" * 30
-    
-    # Get column names from mappings
-    $sourceUsernameCol = $ColumnMappings["cmbSourceUsernameUsers"]
-    $sourcePrisonNumberCol = $ColumnMappings["cmbSourcePrisonNumberUsers"]
-    $sourceFullName1Col = $ColumnMappings["cmbSourceFullName1Users"]
-    $sourceFullName2Col = $ColumnMappings["cmbSourceFullName2Users"]
-    $migratedBarcodeCol = "barcode"     # Fixed: maps to source Username
-    $migratedPrisonIDCol = "prison_id"  # Fixed: maps to source Prison Number
-    $migratedForenameCol = "forename"   # Fixed: maps to source Full Name
-    $migratedSurnameCol = "surname"     # Fixed: maps to source Full Name
-    
-    if (-not $sourceUsernameCol) {
-        $report += "ERROR: Source username column not selected"
-        return $report
-    }
-    
-    # Filter for users with complete required data (username + prison number)
-    $completeSourceUsers = @()
-    foreach ($user in $OriginalData) {
-        $hasUsername = $user.$sourceUsernameCol -and $user.$sourceUsernameCol.ToString().Trim() -ne ""
-        $hasPrisonNumber = $user.$sourcePrisonNumberCol -and $user.$sourcePrisonNumberCol.ToString().Trim() -ne "" -and $user.$sourcePrisonNumberCol.ToString().Trim() -ne "N/A"
-        
-        if ($hasUsername -and $hasPrisonNumber) {
-            $completeSourceUsers += $user
-        }
-    }
-    
-    if ($completeSourceUsers.Count -eq 0) {
-        $report += "ERROR: No users found with complete required data (username AND prison number)"
-        $report += "Total source users: $($OriginalData.Count)"
-        
-        # Show breakdown of missing data
-        $missingPrisonNumber = 0
-        $missingUsername = 0
-        $missingBoth = 0
-        
-        foreach ($user in $OriginalData) {
-            $hasUsername = $user.$sourceUsernameCol -and $user.$sourceUsernameCol.ToString().Trim() -ne ""
-            $hasPrisonNumber = $user.$sourcePrisonNumberCol -and $user.$sourcePrisonNumberCol.ToString().Trim() -ne "" -and $user.$sourcePrisonNumberCol.ToString().Trim() -ne "N/A"
-            
-            if (-not $hasUsername -and -not $hasPrisonNumber) { $missingBoth++ }
-            elseif (-not $hasUsername) { $missingUsername++ }
-            elseif (-not $hasPrisonNumber) { $missingPrisonNumber++ }
-        }
-        
-        $report += "Users missing Prison Number: $missingPrisonNumber"
-        $report += "Users missing Username: $missingUsername"
-        $report += "Users missing both: $missingBoth"
-        return $report
-    }
-    
-    # Get sample from users with complete data
-    $sampleUsers = $completeSourceUsers | Get-Random -Count ([Math]::Min($SampleSize, $completeSourceUsers.Count))
-    
-    $report += "Sample of $($sampleUsers.Count) users selected from $($completeSourceUsers.Count) users with complete data:"
-    $report += "Total source users: $($OriginalData.Count)"
-    $report += "Users with complete data (Username + Prison Number): $($completeSourceUsers.Count)"
-    $report += "NOTE: Migrated usernames expected to have 3-character suffix (e.g., USERNAME -> USERNAMELNI)"
-    $report += ""
-    
-    foreach ($user in $sampleUsers) {
-        $username = $user.$sourceUsernameCol.ToString().Trim()
-        $prisonNumber = $user.$sourcePrisonNumberCol.ToString().Trim()
-        $fullName1 = if ($sourceFullName1Col -and $user.$sourceFullName1Col) { $user.$sourceFullName1Col } else { "N/A" }
-        $fullName2 = if ($sourceFullName2Col -and $user.$sourceFullName2Col) { $user.$sourceFullName2Col } else { "N/A" }
-        
-        $report += "USER: $username"
-        $report += "  Prison Number: $prisonNumber"
-        $report += "  Full Name (forename): $fullName1"
-        $report += "  Full Name (surname): $fullName2"
-        
-        # Check migrated data by barcode prefix (username with 3-character suffix)
-        $migratedUsers = @()
-        foreach ($migratedUser in $MigratedData) {
-            if ($migratedUser.$migratedBarcodeCol -and $migratedUser.$migratedBarcodeCol.ToString().Trim().StartsWith($username)) {
-                $migratedUsers += $migratedUser
-            }
-        }
-        
-        $migratedCount = $migratedUsers.Count
-        $report += "  Migrated occurrences (by username prefix): $migratedCount"
-        
-        # Show migrated user details if found
-        if ($migratedCount -gt 0) {
-            $migratedUser = $migratedUsers[0]  # Take first match
-            
-            $migratedBarcode = $migratedUser.$migratedBarcodeCol.ToString().Trim()
-            $migratedPrisonID = if ($migratedUser.$migratedPrisonIDCol) { $migratedUser.$migratedPrisonIDCol.ToString().Trim() } else { "N/A" }
-            $migratedForename = if ($migratedUser.$migratedForenameCol) { $migratedUser.$migratedForenameCol.ToString().Trim() } else { "N/A" }
-            $migratedSurname = if ($migratedUser.$migratedSurnameCol) { $migratedUser.$migratedSurnameCol.ToString().Trim() } else { "N/A" }
-            
-            $report += "  Migrated Username: $migratedBarcode"
-            $report += "  Migrated Prison ID: $migratedPrisonID"
-            $report += "  Migrated Name: $migratedForename $migratedSurname"
-            
-            # Compare prison numbers
-            if ($migratedPrisonID -eq $prisonNumber) {
-                $report += "  Prison Number Match: [PASS] ($prisonNumber)"
-            } elseif ($migratedPrisonID -eq "N/A") {
-                $report += "  Prison Number Match: [WARN] Missing in migrated data"
-            } else {
-                $report += "  Prison Number Match: [WARN] Different (Source: $prisonNumber, Migrated: $migratedPrisonID)"
-            }
-        } else {
-            $report += "  Migrated user: NOT FOUND"
-        }
-        
-        # Assessment
-        if ($migratedCount -gt 0) {
-            $report += "  STATUS: [PASS] User found in migrated data"
-        } else {
-            $report += "  STATUS: [FAIL] User not found in migrated data"
-        }
-        
-        $report += ""
-    }
-    
-    return $report
-}
-
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -232,6 +105,141 @@ $tabControl = New-Object System.Windows.Forms.TabControl
 $tabControl.Location = New-Object System.Drawing.Point(10, 140)
 $tabControl.Size = New-Object System.Drawing.Size(860, 540)
 $form.Controls.Add($tabControl)
+
+# Updated Perform-UsersSampling
+function Perform-UsersSampling {
+    param($OriginalData, $MigratedData, $ColumnMappings, $SampleSize)
+    
+    $report = @()
+    $report += "USERS SAMPLING ANALYSIS:"
+    $report += "-" * 30
+    
+    # Get column names from mappings
+    $sourceUsernameCol = $ColumnMappings["cmbSourceUsernameUsers"]
+    $sourcePrisonNumberCol = $ColumnMappings["cmbSourcePrisonNumberUsers"]
+    $sourceFullName1Col = $ColumnMappings["cmbSourceFullName1Users"]
+    $sourceFullName2Col = $ColumnMappings["cmbSourceFullName2Users"]
+    $migratedBarcodeCol = "barcode"     # Fixed: maps to source Username
+    $migratedPrisonIDCol = "prison_id"  # Fixed: maps to source Prison Number
+    $migratedForenameCol = "forename"   # Fixed: maps to source Full Name
+    $migratedSurnameCol = "surname"     # Fixed: maps to source Full Name
+    
+    if (-not $sourceUsernameCol) {
+        $report += "ERROR: Source username column not selected"
+        return $report
+    }
+    
+    # Filter for users with complete required data (username + prison number)
+    $completeSourceUsers = @()
+    foreach ($user in $OriginalData) {
+        $hasUsername = $user.$sourceUsernameCol -and $user.$sourceUsernameCol.ToString().Trim() -ne ""
+        $hasPrisonNumber = $user.$sourcePrisonNumberCol -and $user.$sourcePrisonNumberCol.ToString().Trim() -ne "" -and $user.$sourcePrisonNumberCol.ToString().Trim() -ne "N/A"
+        
+        if ($hasUsername -and $hasPrisonNumber) {
+            $completeSourceUsers += $user
+        }
+    }
+    
+    if ($completeSourceUsers.Count -eq 0) {
+        $report += "ERROR: No users found with complete required data (username AND prison number)"
+        $report += "Total source users: $($OriginalData.Count)"
+        
+        # Show breakdown of missing data
+        $missingPrisonNumber = 0
+        $missingUsername = 0
+        $missingBoth = 0
+        
+        foreach ($user in $OriginalData) {
+            $hasUsername = $user.$sourceUsernameCol -and $user.$sourceUsernameCol.ToString().Trim() -ne ""
+            $hasPrisonNumber = $user.$sourcePrisonNumberCol -and $user.$sourcePrisonNumberCol.ToString().Trim() -ne "" -and $user.$sourcePrisonNumberCol.ToString().Trim() -ne "N/A"
+            
+            if (-not $hasUsername -and -not $hasPrisonNumber) { $missingBoth++ }
+            elseif (-not $hasUsername) { $missingUsername++ }
+            elseif (-not $hasPrisonNumber) { $missingPrisonNumber++ }
+        }
+        
+        $report += "Users missing Prison Number: $missingPrisonNumber"
+        $report += "Users missing Username: $missingUsername"
+        $report += "Users missing both: $missingBoth"
+        return $report
+    }
+    
+    # Get sample from users with complete data
+    $sampleUsers = $completeSourceUsers | Get-Random -Count ([Math]::Min($SampleSize, $completeSourceUsers.Count))
+    
+    $report += "Sample of $($sampleUsers.Count) users selected from $($completeSourceUsers.Count) users with complete data:"
+    $report += "Total source users: $($OriginalData.Count)"
+    $report += "Users with complete data (Username + Prison Number): $($completeSourceUsers.Count)"
+    $report += "NOTE: Migrated usernames expected to have 3-character suffix (e.g., USERNAME -> USERNAMELNI)"
+    $report += ""
+    
+    foreach ($user in $sampleUsers) {
+        $username = $user.$sourceUsernameCol.ToString().Trim()
+        $prisonNumber = $user.$sourcePrisonNumberCol.ToString().Trim()
+        $fullName1 = if ($sourceFullName1Col -and $user.$sourceFullName1Col) { $user.$sourceFullName1Col } else { "N/A" }
+        $fullName2 = if ($sourceFullName2Col -and $user.$sourceFullName2Col) { $user.$sourceFullName2Col } else { "N/A" }
+        
+        $report += "USER: $username"
+        $report += "  Prison Number: $prisonNumber"
+        $report += "  Full Name (forename): $fullName1"
+        $report += "  Full Name (surname): $fullName2"
+        
+        # Check for migrated data by barcode prefix (username with 3-character suffix)
+        $migratedUsers = @()
+        foreach ($migratedUser in $MigratedData) {
+            if ($migratedUser.$migratedBarcodeCol -and 
+                $migratedUser.$migratedBarcodeCol.ToString().Trim().StartsWith($username, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $migratedUsers += $migratedUser
+            }
+        }
+        
+        $migratedCount = $migratedUsers.Count
+        $report += "  Migrated occurrences (by username prefix): $migratedCount"
+        
+        # Show migrated user details if found
+        if ($migratedCount -gt 0) {
+            $migratedUser = $migratedUsers[0]  # Take first match
+            
+            $migratedBarcode = $migratedUser.$migratedBarcodeCol.ToString().Trim()
+            $migratedPrisonID = if ($migratedUser.$migratedPrisonIDCol) { $migratedUser.$migratedPrisonIDCol.ToString().Trim() } else { "N/A" }
+            $migratedForename = if ($migratedUser.$migratedForenameCol) { $migratedUser.$migratedForenameCol.ToString().Trim() } else { "N/A" }
+            $migratedSurname = if ($migratedUser.$migratedSurnameCol) { $migratedUser.$migratedSurnameCol.ToString().Trim() } else { "N/A" }
+            
+            $report += "  Migrated Username: $migratedBarcode"
+            $report += "  Migrated Prison ID: $migratedPrisonID"
+            $report += "  Migrated Name: $migratedForename $migratedSurname"
+            
+            # Compare prison numbers
+            if ($migratedPrisonID.ToLower() -eq $prisonNumber.ToLower()) {
+                $report += "  Prison Number Match: [PASS] ($prisonNumber)"
+            } elseif ($migratedPrisonID -eq "N/A") {
+                $report += "  Prison Number Match: [WARN] Missing in migrated data"
+            } else {
+                $report += "  Prison Number Match: [WARN] Different (Source: $prisonNumber, Migrated: $migratedPrisonID)"
+            }
+            
+            # Show case transformation details
+            $originalCase = $username
+            $migratedCase = $migratedBarcode
+            if ($originalCase -cne $migratedCase.Substring(0, [Math]::Min($originalCase.Length, $migratedCase.Length))) {
+                $report += "  Case Transform: $originalCase -> $migratedCase"
+            }
+        } else {
+            $report += "  Migrated user: NOT FOUND"
+        }
+        
+        # Assessment
+        if ($migratedCount -gt 0) {
+            $report += "  STATUS: [PASS] User found in migrated data"
+        } else {
+            $report += "  STATUS: [FAIL] User not found in migrated data"
+        }
+        
+        $report += ""
+    }
+    
+    return $report
+}
 
 # Function to browse for folders
 function Browse-Folder {
